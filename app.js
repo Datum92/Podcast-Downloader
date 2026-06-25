@@ -2,10 +2,18 @@
 let podcastData = null;
 let selectedEpisodes = new Set();
 let searchQuery = "";
+let isPolling = false;
+let pollIntervalId = null;
+
+// Browser download state (for static mode)
 let isBatchDownloading = false;
 let batchDownloadQueue = [];
 let batchDownloadIndex = 0;
 let batchDownloadInterval = null;
+
+// Detect running mode: True if served by local Python server
+const isLocalServerMode = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
+console.log(`Running in ${isLocalServerMode ? 'Python Local Server' : 'Static Browser'} Mode`);
 
 // DOM Elements
 const elUrlInput = document.getElementById("podcast-url");
@@ -24,6 +32,9 @@ const elShowDesc = document.getElementById("show-desc");
 const elSingleEpisodeSuggestion = document.getElementById("single-episode-suggestion");
 const elBtnLoadFullShow = document.getElementById("btn-load-full-show");
 
+// Dual mode cards
+const elDownloadDirCard = document.getElementById("download-dir-card");
+const elDownloadDirInput = document.getElementById("download-dir");
 const elDownloadToolsCard = document.getElementById("download-tools-card");
 const elBtnCopyLinks = document.getElementById("btn-copy-links");
 const elBtnBrowserDownload = document.getElementById("btn-browser-download");
@@ -40,6 +51,26 @@ const elEpisodesList = document.getElementById("episodes-list");
 const elSelectedCount = document.getElementById("selected-count");
 const elTotalCount = document.getElementById("total-count");
 
+// Python progress elements
+const elBtnStartDownload = document.getElementById("btn-start-download");
+const elProgressCard = document.getElementById("progress-card");
+const elBtnCancelDownloads = document.getElementById("btn-cancel-downloads");
+const elProgressStatusIcon = document.getElementById("progress-status-icon");
+const elQueueRemaining = document.getElementById("queue-remaining");
+const elQueueCompleted = document.getElementById("queue-completed");
+const elActiveDownloadContainer = document.getElementById("active-download-container");
+const elActiveDownloadTitle = document.getElementById("active-download-title");
+const elActiveProgressFill = document.getElementById("active-progress-fill");
+const elActiveProgressPercent = document.getElementById("active-progress-percent");
+const elActiveProgressSize = document.getElementById("active-progress-size");
+const elActiveProgressSpeed = document.getElementById("active-progress-speed");
+const elDownloadIdleContainer = document.getElementById("download-idle-container");
+const elLogCompletedCount = document.getElementById("log-completed-count");
+const elLogFailedCount = document.getElementById("log-failed-count");
+const elCompletedLogList = document.getElementById("completed-log-list");
+const elFailedLogList = document.getElementById("failed-log-list");
+
+// Browser progress elements
 const elBrowserProgressCard = document.getElementById("browser-progress-card");
 const elBtnCancelBrowserDownload = document.getElementById("btn-cancel-browser-download");
 const elBrowserQueueRemaining = document.getElementById("browser-queue-remaining");
@@ -49,6 +80,14 @@ const elBrowserProgressFill = document.getElementById("browser-progress-fill");
 
 // Initialize Setup
 window.addEventListener("DOMContentLoaded", () => {
+    // Show correct settings card depending on mode
+    if (isLocalServerMode) {
+        elDownloadDirInput.value = "C:\\Users\\user\\Downloads\\Podcasts";
+        elBtnStartDownload.classList.remove("hidden");
+    } else {
+        elDownloadToolsCard.classList.remove("hidden");
+    }
+    
     // Add Event Listeners
     elBtnParse.addEventListener("click", handleParse);
     elUrlInput.addEventListener("keydown", (e) => {
@@ -66,13 +105,44 @@ window.addEventListener("DOMContentLoaded", () => {
     elBtnSelectLatest50.addEventListener("click", () => selectLatestN(50));
     elHeaderSelectAll.addEventListener("change", toggleHeaderSelectAll);
     
+    // Wire download triggers
+    elBtnStartDownload.addEventListener("click", startLocalDownloads);
+    elBtnCancelDownloads.addEventListener("click", cancelLocalDownloads);
+    
     elBtnCopyLinks.addEventListener("click", copySelectedLinks);
     elBtnBrowserDownload.addEventListener("click", startBrowserBatchDownload);
     elBtnCancelBrowserDownload.addEventListener("click", stopBrowserBatchDownload);
     elBtnLoadFullShow.addEventListener("click", loadFullShowFromEpisode);
+    
+    // Tab switching for Python progress logs
+    document.querySelectorAll(".tab-btn").forEach(btn => {
+        btn.addEventListener("click", (e) => {
+            document.querySelectorAll(".tab-btn").forEach(b => b.classList.remove("active"));
+            document.querySelectorAll(".log-panel").forEach(p => p.classList.add("hidden"));
+            
+            btn.classList.add("active");
+            const activeTabId = btn.getAttribute("data-tab");
+            document.getElementById(activeTabId).classList.remove("hidden");
+        });
+    });
+    
+    // Check initial status for local server
+    if (isLocalServerMode) {
+        checkLocalDownloaderStatus();
+    }
 });
 
-// ----------------- CORS PROXY FETCHING -----------------
+// Helper: Format Bytes
+function formatBytes(bytes, decimals = 2) {
+    if (bytes === 0) return '0 Bytes';
+    const k = 1024;
+    const dm = decimals < 0 ? 0 : decimals;
+    const sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(dm)) + ' ' + sizes[i];
+}
+
+// ----------------- DUAL-PROXY FETCHING (STATIC WEB MODE) -----------------
 
 async function fetchWithProxy(url) {
     // Both corsproxy.io and AllOrigins require slashes and protocols to remain unencoded (safe='/')
@@ -190,19 +260,12 @@ function recursiveSearchKeys(obj, keysList) {
 function parseRssFeed(xmlText, feedUrl) {
     const parser = new DOMParser();
     const xmlDoc = parser.parseFromString(xmlText, "text/xml");
-    
-    // Check parse error
     const parserError = xmlDoc.querySelector("parsererror");
-    if (parserError) {
-        throw new Error("RSS XML 解析出錯。");
-    }
+    if (parserError) throw new Error("RSS XML 解析出錯。");
     
     const channel = xmlDoc.querySelector("channel");
-    if (!channel) {
-        throw new Error("找不到 RSS 的 <channel> 節點。");
-    }
+    if (!channel) throw new Error("找不到 RSS 的 <channel> 節點。");
     
-    // Extract metadata
     const showTitle = channel.getElementsByTagName("title")[0]?.textContent || "未知節目";
     const author = channel.getElementsByTagName("itunes:author")[0]?.textContent || 
                    channel.getElementsByTagName("author")[0]?.textContent || "";
@@ -210,9 +273,7 @@ function parseRssFeed(xmlText, feedUrl) {
     
     let showImage = "";
     const imageEl = channel.getElementsByTagName("image")[0];
-    if (imageEl) {
-        showImage = imageEl.getElementsByTagName("url")[0]?.textContent || "";
-    }
+    if (imageEl) showImage = imageEl.getElementsByTagName("url")[0]?.textContent || "";
     if (!showImage) {
         const itunesImage = channel.getElementsByTagName("itunes:image")[0];
         showImage = itunesImage?.getAttribute("href") || "";
@@ -223,7 +284,6 @@ function parseRssFeed(xmlText, feedUrl) {
     
     for (let item of items) {
         const title = item.getElementsByTagName("title")[0]?.textContent || "無標題單集";
-        
         const enclosure = item.getElementsByTagName("enclosure")[0];
         if (!enclosure) continue;
         const audioUrl = enclosure.getAttribute("url");
@@ -234,14 +294,9 @@ function parseRssFeed(xmlText, feedUrl) {
         if (pubDateRaw) {
             try {
                 const dateObj = new Date(pubDateRaw);
-                if (!isNaN(dateObj)) {
-                    formattedDate = dateObj.toISOString().split('T')[0];
-                } else {
-                    formattedDate = pubDateRaw;
-                }
-            } catch(e) {
-                formattedDate = pubDateRaw;
-            }
+                if (!isNaN(dateObj)) formattedDate = dateObj.toISOString().split('T')[0];
+                else formattedDate = pubDateRaw;
+            } catch(e) { formattedDate = pubDateRaw; }
         }
         
         const duration = item.getElementsByTagName("itunes:duration")[0]?.textContent || 
@@ -272,16 +327,13 @@ async function parseApplePodcastUrl(htmlText, url) {
     const parser = new DOMParser();
     const doc = parser.parseFromString(htmlText, "text/html");
     
-    // Find script with id serialized-server-data (Try DOMParser first, then fallback to regex)
     let serverDataText = "";
     const scriptEl = doc.getElementById("serialized-server-data");
     if (scriptEl) {
         serverDataText = scriptEl.textContent.trim();
     } else {
         const match = htmlText.match(/<script\b[^>]*id="serialized-server-data"[^>]*>([\s\S]*?)<\/script>/);
-        if (match) {
-            serverDataText = match[1].trim();
-        }
+        if (match) serverDataText = match[1].trim();
     }
     
     if (!serverDataText) {
@@ -289,20 +341,14 @@ async function parseApplePodcastUrl(htmlText, url) {
     }
     
     const serverData = JSON.parse(serverDataText);
-    
-    // Check if it's an episode link
     const match = url.match(/[?&]i=(\d+)/);
     const episodeId = match ? match[1] : null;
     
     if (episodeId) {
-        // Episode Page
         const episodesData = recursiveSearchKeys(serverData, ["streamUrl", "title"]);
         if (episodesData.length === 0) {
-            // Fallback to streamUrl
             const streamUrls = recursiveSearchKey(serverData, "streamUrl");
-            if (streamUrls.length === 0) {
-                throw new Error("無法從此單集頁面解析音檔網址。");
-            }
+            if (streamUrls.length === 0) throw new Error("無法從此單集頁面解析音檔網址。");
             return {
                 is_single: true,
                 episode_id: episodeId,
@@ -316,7 +362,6 @@ async function parseApplePodcastUrl(htmlText, url) {
             };
         }
         
-        // Find matching item or default to first
         let ep = episodesData[0];
         for (let item of episodesData) {
             if (String(item.contentId) === String(episodeId)) {
@@ -327,8 +372,6 @@ async function parseApplePodcastUrl(htmlText, url) {
         
         const title = ep.title || "無標題單集";
         const streamUrl = ep.streamUrl;
-        
-        // Duration
         const durationSec = ep.duration || 0;
         let durationStr = "";
         if (durationSec) {
@@ -341,18 +384,15 @@ async function parseApplePodcastUrl(htmlText, url) {
                 `${remMin.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
         }
         
-        // Date
         const releaseDate = ep.releaseDate || "";
         const formattedDate = releaseDate.length >= 10 ? releaseDate.slice(0, 10) : releaseDate;
         
-        // Artwork image template
         let imageUrl = "";
         const artwork = ep.artwork;
         if (artwork && typeof artwork === 'object' && artwork.template) {
             imageUrl = artwork.template.replace("{w}x{h}", "600x600").replace("{f}", "jpg");
         }
         
-        // Show details & feedUrl
         let showTitle = "未知節目";
         let feedUrl = "";
         const showOffer = ep.showOffer || ep.podcastOffer;
@@ -373,19 +413,13 @@ async function parseApplePodcastUrl(htmlText, url) {
             feed_url: feedUrl
         };
     } else {
-        // Show Page
         let feedUrls = recursiveSearchKey(serverData, "feedUrl");
         if (feedUrls.length === 0) {
-            // Regex fallback search
             const jsonStr = JSON.stringify(serverData);
             const rssMatch = jsonStr.match(/https?:\/\/[^\s"']*?\.xml[^\s"']*?/);
-            if (rssMatch) {
-                feedUrls = [rssMatch[0]];
-            } else {
-                throw new Error("無法定位此節目的 RSS 訂閱源 (feedUrl) 網址。");
-            }
+            if (rssMatch) feedUrls = [rssMatch[0]];
+            else throw new Error("無法定位此節目的 RSS 訂閱源 (feedUrl) 網址。");
         }
-        
         const rssUrl = feedUrls[0];
         showParseLoading("成功找到 RSS 訂閱源，正在解析全集資訊...");
         const xmlText = await fetchWithProxy(rssUrl);
@@ -393,7 +427,7 @@ async function parseApplePodcastUrl(htmlText, url) {
     }
 }
 
-async function resolveUrl(url) {
+async function resolveUrlClientSide(url) {
     url = url.trim();
     if (!url) throw new Error("網址不可為空。");
     
@@ -406,7 +440,6 @@ async function resolveUrl(url) {
         const xmlText = await fetchWithProxy(url);
         return parseRssFeed(xmlText, url);
     } else {
-        // Attempt Apple Podcasts lookup if ID is provided
         if (/^\d+$/.test(url)) {
             showParseLoading("正在查詢 iTunes ID...");
             const lookupUrl = `https://itunes.apple.com/lookup?id=${url}`;
@@ -423,9 +456,8 @@ async function resolveUrl(url) {
     }
 }
 
-// ----------------- FRONTEND UI ACTIONS -----------------
+// ----------------- PARSE ACTION HANDLER -----------------
 
-// Handler: Parsing Podcast URL
 async function handleParse() {
     const url = elUrlInput.value.trim();
     if (!url) {
@@ -433,19 +465,32 @@ async function handleParse() {
         return;
     }
     
-    // UI State Reset
     hideError();
-    showParseLoading("正在取得網頁內容...");
+    showParseLoading("正在載入節目網頁資訊...");
     elBtnParse.classList.add("loading");
     elBtnParse.disabled = true;
     
     elShowCard.classList.add("hidden");
+    elDownloadDirCard.classList.add("hidden");
     elDownloadToolsCard.classList.add("hidden");
     elEpisodesCard.classList.add("hidden");
     stopBrowserBatchDownload();
     
     try {
-        podcastData = await resolveUrl(url);
+        if (isLocalServerMode) {
+            // Fetch parsing results directly from local python API
+            const response = await fetch("/api/parse", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ url: url })
+            });
+            const data = await response.json();
+            if (!response.ok) throw new Error(data.error || "本地服務解析失敗。");
+            podcastData = data;
+        } else {
+            // Fetch client side using proxy
+            podcastData = await resolveUrlClientSide(url);
+        }
         displayPodcastInfo();
     } catch (err) {
         showError(err.message);
@@ -456,17 +501,16 @@ async function handleParse() {
     }
 }
 
-// Display Podcast details to cards
+// Display Details
 function displayPodcastInfo() {
     if (!podcastData) return;
     
-    // Fill details
     elShowTitle.textContent = podcastData.show_title;
     elShowAuthor.textContent = podcastData.author || "未知創作者";
     
     if (podcastData.is_single) {
         elBadgeType.textContent = "單集";
-        elShowDesc.textContent = "發佈日期: " + (podcastData.date || "無資料") + "\n時長: " + (podcastData.duration || "無資料");
+        elShowDesc.textContent = `發佈日期: ${podcastData.date || "無資料"} | 時長: ${podcastData.duration || "無資料"}`;
         elSingleEpisodeSuggestion.classList.toggle("hidden", !podcastData.feed_url);
     } else {
         elBadgeType.textContent = "節目";
@@ -474,7 +518,6 @@ function displayPodcastInfo() {
         elSingleEpisodeSuggestion.classList.add("hidden");
     }
     
-    // Cover art fallback
     if (podcastData.image) {
         elShowImage.src = podcastData.image;
         elShowImage.classList.remove("hidden");
@@ -483,17 +526,20 @@ function displayPodcastInfo() {
         elShowImage.classList.add("hidden");
     }
     
-    // Display cards
-    elShowCard.classList.remove("hidden");
-    elDownloadToolsCard.classList.remove("hidden");
+    // Show panels depending on mode
+    if (isLocalServerMode) {
+        const sanitizeTitle = podcastData.show_title.replace(/[\\/:*?"<>|]/g, "_").trim();
+        elDownloadDirInput.value = `C:\\Users\\user\\Downloads\\Podcasts\\${sanitizeTitle}`;
+        elDownloadDirCard.classList.remove("hidden");
+    } else {
+        elDownloadToolsCard.classList.remove("hidden");
+    }
     
-    // Handle episode list setup
     selectedEpisodes.clear();
     elEpisodeSearch.value = "";
     searchQuery = "";
     
     if (podcastData.is_single) {
-        // Create an episode object for simple listing
         const singleEp = {
             title: podcastData.episode_title,
             url: podcastData.url,
@@ -501,7 +547,7 @@ function displayPodcastInfo() {
             duration: podcastData.duration
         };
         podcastData.episodes = [singleEp];
-        selectedEpisodes.add(singleEp); // Pre-select the single episode
+        selectedEpisodes.add(singleEp);
     }
     
     renderEpisodesList();
@@ -509,11 +555,10 @@ function displayPodcastInfo() {
     updateSelectionUI();
 }
 
-// Render dynamic episode table lines
+// Render Table Rows
 function renderEpisodesList() {
     if (!podcastData || !podcastData.episodes) return;
     
-    // Filter visible list based on search query
     const visibleEpisodes = podcastData.episodes.filter(ep => 
         ep.title.toLowerCase().includes(searchQuery)
     );
@@ -526,7 +571,6 @@ function renderEpisodesList() {
         return;
     }
     
-    // Update Header checkbox state
     const allVisibleSelected = visibleEpisodes.every(ep => selectedEpisodes.has(ep));
     elHeaderSelectAll.checked = allVisibleSelected && visibleEpisodes.length > 0;
     
@@ -543,24 +587,21 @@ function renderEpisodesList() {
             <td>
                 <div class="action-btn-cell">
                     <button class="btn-icon-only btn-copy-single" title="複製 MP3 連結"><i class="fa-regular fa-copy"></i></button>
-                    <a href="${ep.url}" target="_blank" download="${ep.title}.mp3" class="btn-icon-only btn-dl-single" title="瀏覽器直接下載"><i class="fa-solid fa-download"></i></a>
+                    <a href="${ep.url}" target="_blank" download="${ep.title}.mp3" class="btn-icon-only btn-dl-single" title="開新分頁播放"><i class="fa-solid fa-play"></i></a>
                 </div>
             </td>
         `;
         
-        // Single Copy Link action
         tr.querySelector(".btn-copy-single").addEventListener("click", (e) => {
             e.stopPropagation();
             navigator.clipboard.writeText(ep.url);
             showToast("已複製單集 MP3 連結");
         });
         
-        // Stop row click propagation on download button
         tr.querySelector(".btn-dl-single").addEventListener("click", (e) => {
             e.stopPropagation();
         });
         
-        // Toggle selection on row click (excluding buttons and checkbox)
         tr.addEventListener("click", (e) => {
             if (e.target.tagName !== "INPUT" && e.target.type !== "checkbox" && !e.target.closest(".btn-icon-only")) {
                 const check = tr.querySelector(".ep-check");
@@ -569,7 +610,6 @@ function renderEpisodesList() {
             }
         });
         
-        // Toggle selection on checkbox change
         const checkbox = tr.querySelector(".ep-check");
         checkbox.addEventListener("change", (e) => {
             toggleEpisodeSelection(ep, e.target.checked, tr);
@@ -588,7 +628,6 @@ function toggleEpisodeSelection(episode, isSelected, rowElement) {
         rowElement.classList.remove("selected");
     }
     
-    // Sync Header Checkbox
     const visibleEpisodes = podcastData.episodes.filter(ep => 
         ep.title.toLowerCase().includes(searchQuery)
     );
@@ -598,7 +637,6 @@ function toggleEpisodeSelection(episode, isSelected, rowElement) {
     updateSelectionUI();
 }
 
-// Update selection counts and button availability
 function updateSelectionUI() {
     const selectedCount = selectedEpisodes.size;
     const totalCount = podcastData ? podcastData.episodes.length : 0;
@@ -607,20 +645,23 @@ function updateSelectionUI() {
     elTotalCount.textContent = totalCount;
     
     const disabledState = selectedCount === 0;
-    elBtnCopyLinks.disabled = disabledState;
-    elBtnBrowserDownload.disabled = disabledState;
     
-    elBtnCopyLinks.innerHTML = `<i class="fa-solid fa-copy"></i> 複製已選 MP3 下載連結 (${selectedCount})`;
-    elBtnBrowserDownload.innerHTML = `<i class="fa-solid fa-download"></i> 瀏覽器直接下載已選項目 (${selectedCount})`;
+    if (isLocalServerMode) {
+        elBtnStartDownload.disabled = disabledState;
+        elBtnStartDownload.innerHTML = `<i class="fa-solid fa-cloud-arrow-down"></i> 開始下載已選集數 (${selectedCount})`;
+    } else {
+        elBtnCopyLinks.disabled = disabledState;
+        elBtnBrowserDownload.disabled = disabledState;
+        elBtnCopyLinks.innerHTML = `<i class="fa-solid fa-copy"></i> 複製已選 MP3 下載連結 (${selectedCount})`;
+        elBtnBrowserDownload.innerHTML = `<i class="fa-solid fa-download"></i> 瀏覽器直接下載已選項目 (${selectedCount})`;
+    }
 }
 
-// Batch Selection Functions
+// Batch Selection
 function selectAllVisible() {
     if (!podcastData) return;
     podcastData.episodes.forEach(ep => {
-        if (ep.title.toLowerCase().includes(searchQuery)) {
-            selectedEpisodes.add(ep);
-        }
+        if (ep.title.toLowerCase().includes(searchQuery)) selectedEpisodes.add(ep);
     });
     renderEpisodesList();
     updateSelectionUI();
@@ -646,38 +687,153 @@ function selectLatestN(n) {
 function toggleHeaderSelectAll(e) {
     if (!podcastData) return;
     const isChecked = e.target.checked;
-    
     podcastData.episodes.forEach(ep => {
         if (ep.title.toLowerCase().includes(searchQuery)) {
-            if (isChecked) {
-                selectedEpisodes.add(ep);
-            } else {
-                selectedEpisodes.delete(ep);
-            }
+            if (isChecked) selectedEpisodes.add(ep);
+            else selectedEpisodes.delete(ep);
         }
     });
-    
     renderEpisodesList();
     updateSelectionUI();
 }
 
-// Single Episode Load Full Show
 function loadFullShowFromEpisode() {
     if (!podcastData || !podcastData.feed_url) return;
     elUrlInput.value = podcastData.feed_url;
     handleParse();
 }
 
-// ----------------- DOWNLOADING ACTIONS -----------------
+// ----------------- DOWNLOAD ACTION (LOCAL SERVER MODE) -----------------
 
-// Helper A: Copy Links to Clipboard
+async function startLocalDownloads() {
+    if (selectedEpisodes.size === 0) return;
+    const downloadDir = elDownloadDirInput.value.trim();
+    if (!downloadDir) {
+        alert("請指定下載儲存路徑！");
+        return;
+    }
+    
+    const episodesToDownload = Array.from(selectedEpisodes).map(ep => ({
+        title: ep.title,
+        url: ep.url,
+        date: ep.date
+    }));
+    
+    try {
+        const response = await fetch("/api/download", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                episodes: episodesToDownload,
+                download_dir: downloadDir
+            })
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || "無法啟動下載任務。");
+        elProgressCard.classList.remove("hidden");
+        startLocalPolling();
+    } catch (err) {
+        alert("下載出錯: " + err.message);
+    }
+}
+
+async function cancelLocalDownloads() {
+    if (!confirm("確定要取消佇列中所有的下載任務嗎？")) return;
+    try {
+        await fetch("/api/cancel", { method: "POST" });
+        checkLocalDownloaderStatus();
+    } catch (err) {
+        console.error("取消下載錯誤: ", err);
+    }
+}
+
+function startLocalPolling() {
+    if (isPolling) return;
+    isPolling = true;
+    checkLocalDownloaderStatus();
+    pollIntervalId = setInterval(checkLocalDownloaderStatus, 1000);
+}
+
+function stopLocalPolling() {
+    if (!isPolling) return;
+    isPolling = false;
+    if (pollIntervalId) {
+        clearInterval(pollIntervalId);
+        pollIntervalId = null;
+    }
+}
+
+async function checkLocalDownloaderStatus() {
+    try {
+        const response = await fetch("/api/status");
+        if (!response.ok) return;
+        const status = await response.json();
+        updateLocalProgressUI(status);
+        if (status.is_downloading || status.total_in_queue > 0) {
+            elProgressCard.classList.remove("hidden");
+            startLocalPolling();
+        } else {
+            stopLocalPolling();
+        }
+    } catch (err) {
+        console.error("無法取得下載器狀態: ", err);
+    }
+}
+
+function updateLocalProgressUI(status) {
+    elQueueRemaining.textContent = status.total_in_queue;
+    elQueueCompleted.textContent = status.completed_in_session;
+    
+    if (status.is_downloading && status.current_episode) {
+        elDownloadIdleContainer.classList.add("hidden");
+        elActiveDownloadContainer.classList.remove("hidden");
+        
+        const ep = status.current_episode;
+        elActiveDownloadTitle.textContent = ep.title;
+        elActiveDownloadTitle.title = ep.title;
+        elActiveProgressFill.style.width = `${ep.percent}%`;
+        elActiveProgressPercent.textContent = `${ep.percent}%`;
+        elActiveProgressSize.textContent = `${formatBytes(ep.bytes_downloaded)} / ${formatBytes(ep.bytes_total)}`;
+        elActiveProgressSpeed.innerHTML = `<i class="fa-solid fa-gauge-high"></i> ${formatBytes(ep.speed)}/s`;
+    } else {
+        elActiveDownloadContainer.classList.add("hidden");
+        elDownloadIdleContainer.classList.remove("hidden");
+    }
+    
+    elLogCompletedCount.textContent = status.completed.length;
+    elLogFailedCount.textContent = status.failed.length;
+    
+    if (status.completed.length > 0) {
+        elCompletedLogList.innerHTML = status.completed.map(title => `
+            <li class="completed-item">
+                <span title="${title}"><i class="fa-regular fa-circle-check icon-green"></i> ${title}</span>
+                <span style="color: var(--text-muted); font-size: 0.75rem;">已存檔</span>
+            </li>
+        `).reverse().join("");
+    } else {
+        elCompletedLogList.innerHTML = `<li class="empty-log">尚無完成的下載項目</li>`;
+    }
+    
+    if (status.failed.length > 0) {
+        elFailedLogList.innerHTML = status.failed.map(item => `
+            <li class="failed-item">
+                <span title="${item.title}"><i class="fa-regular fa-circle-xmark icon-danger"></i> ${item.title}</span>
+                <span class="item-error">${item.error}</span>
+            </li>
+        `).reverse().join("");
+    } else {
+        elFailedLogList.innerHTML = `<li class="empty-log">尚無失敗的下載項目</li>`;
+    }
+}
+
+// ----------------- DOWNLOAD ACTION (STATIC WEB MODE) -----------------
+
 function copySelectedLinks() {
     if (selectedEpisodes.size === 0) return;
-    
     const linksList = Array.from(selectedEpisodes).map(ep => ep.url).join("\n");
     navigator.clipboard.writeText(linksList)
         .then(() => {
-            alert(`成功複製 ${selectedEpisodes.size} 個 MP3 下載連結！\n\n您可以打開 JDownloader / IDM 貼上，軟體會立即建立下載任務。`);
+            alert(`成功複製 ${selectedEpisodes.size} 個 MP3 下載連結！\n\n您可以打開 JDownloader / IDM 貼上進行批量下載。`);
         })
         .catch(err => {
             console.error("複製連結失敗: ", err);
@@ -685,21 +841,15 @@ function copySelectedLinks() {
         });
 }
 
-// Helper B: Browser Sequential Pop-up Download
 function startBrowserBatchDownload() {
     if (selectedEpisodes.size === 0) return;
-    
     batchDownloadQueue = Array.from(selectedEpisodes);
     batchDownloadIndex = 0;
     isBatchDownloading = true;
-    
-    // Show Progress Card
     elBrowserProgressCard.classList.remove("hidden");
-    
-    // Start interval loop
     updateBrowserProgressUI();
     triggerNextBrowserDownload();
-    batchDownloadInterval = setInterval(triggerNextBrowserDownload, 1500); // 1.5s delay to let browser handle popups safely
+    batchDownloadInterval = setInterval(triggerNextBrowserDownload, 1500);
 }
 
 function triggerNextBrowserDownload() {
@@ -707,20 +857,16 @@ function triggerNextBrowserDownload() {
         stopBrowserBatchDownload();
         return;
     }
-    
     if (batchDownloadIndex >= batchDownloadQueue.length) {
         stopBrowserBatchDownload();
         alert("已完成調用所有選擇的下載連結！\n如果部分項目未下載，請確認您已在瀏覽器設定中「允許此站台下載多個檔案與彈出視窗」。");
         return;
     }
-    
     const ep = batchDownloadQueue[batchDownloadIndex];
-    
-    // Create temporary download element and click it
     const a = document.createElement("a");
     a.href = ep.url;
     a.download = `${ep.title}.mp3`;
-    a.target = "_blank"; // Required for cross-origin downloads to open in new tab and trigger media save
+    a.target = "_blank";
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
@@ -779,7 +925,6 @@ function hideError() {
 }
 
 function showToast(msg) {
-    // Simple alert or status-bar toast
     const toast = document.createElement("div");
     toast.style.position = "fixed";
     toast.style.bottom = "20px";
@@ -795,7 +940,6 @@ function showToast(msg) {
     toast.style.fontFamily = "sans-serif";
     toast.textContent = msg;
     document.body.appendChild(toast);
-    
     setTimeout(() => {
         toast.style.opacity = "0";
         toast.style.transition = "opacity 0.5s ease";

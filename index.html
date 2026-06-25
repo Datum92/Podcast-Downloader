@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Podcast 語音下載工具 (GitHub Pages 版)</title>
+    <title>Podcast 語音下載工具</title>
     <!-- Google Fonts -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -22,7 +22,7 @@
                 <i class="fa-solid fa-podcast logo-icon"></i>
                 <h1>Podcast Downloader</h1>
             </div>
-            <p class="subtitle">免安裝後端！直接在瀏覽器解析 Apple Podcasts 與 RSS 音檔</p>
+            <p class="subtitle">下載 Apple Podcasts 與 RSS 音檔，支援單集及批次下載</p>
         </header>
 
         <!-- Main Workspace -->
@@ -45,7 +45,7 @@
                     </div>
                     <div id="parse-loading" class="loading-container hidden">
                         <div class="spinner"></div>
-                        <p id="parse-loading-text">正在透過代理伺服器解析，請稍候...</p>
+                        <p id="parse-loading-text">正在解析網址，請稍候...</p>
                     </div>
                     <div id="parse-error" class="error-banner hidden">
                         <i class="fa-solid fa-circle-exclamation"></i>
@@ -74,7 +74,20 @@
                     </div>
                 </div>
                 
-                <!-- Download Tools Card -->
+                <!-- Destination Folder Card (Python Local Server Mode only) -->
+                <div class="card glass-card fade-in hidden" id="download-dir-card">
+                    <div class="card-header">
+                        <i class="fa-solid fa-folder-open icon-purple"></i>
+                        <h2>下載儲存設定</h2>
+                    </div>
+                    <div class="folder-group">
+                        <label for="download-dir">儲存路徑 (本地目錄):</label>
+                        <input type="text" id="download-dir" placeholder="C:\Users\user\Downloads\Podcasts" value="">
+                        <p class="folder-tip"><i class="fa-solid fa-circle-info"></i> 程式會為此節目自動建立子目錄並直接下載至您的硬碟。</p>
+                    </div>
+                </div>
+
+                <!-- Download Tools Card (Static Web Mode only) -->
                 <div class="card glass-card fade-in hidden" id="download-tools-card">
                     <div class="card-header">
                         <i class="fa-solid fa-toolbox icon-purple"></i>
@@ -91,8 +104,8 @@
                     <div class="tool-instructions">
                         <h3><i class="fa-solid fa-circle-question"></i> 如何批量下載？</h3>
                         <ul>
-                            <li><strong>方法 A (推薦，最快)</strong>：點擊「複製連結」後，打開下載軟體（如 <strong>JDownloader</strong> 或 <strong>IDM</strong>），軟體會自動偵測剪貼簿並開始批量高速下載。</li>
-                            <li><strong>方法 B</strong>：點擊「瀏覽器直接下載」，瀏覽器會依序彈出視窗進行下載。<em>(首次使用請在瀏覽器網址列右側允許本站「彈出多個視窗與下載」)</em></li>
+                            <li><strong>方法 A (推薦，最快)</strong>：點擊「複製連結」後，打開下載軟體（如 <strong>JDownloader</strong> 或 <strong>IDM</strong>），軟體會自動偵測剪貼簿並開始批量下載。</li>
+                            <li><strong>方法 B</strong>：點擊「瀏覽器直接下載」，瀏覽器會依序下載項目。<em>(首次使用請允許本站「彈出多個視窗與下載」)</em></li>
                         </ul>
                     </div>
                 </div>
@@ -145,14 +158,84 @@
                         <div class="selected-summary">
                             已選擇 <strong id="selected-count" class="accent-color">0</strong> / <span id="total-count">0</span> 集
                         </div>
+                        <button id="btn-start-download" class="btn btn-success btn-large hidden" disabled>
+                            <i class="fa-solid fa-cloud-arrow-down"></i> 開始下載已選集數
+                        </button>
                     </div>
                 </div>
 
-                <!-- Browser Download Status Card -->
-                <div class="card glass-card fade-in hidden" id="browser-progress-card">
+                <!-- Python Download Progress Card (Local Server Mode only) -->
+                <div class="card glass-card fade-in hidden" id="progress-card">
                     <div class="card-header progress-header-flex">
                         <div class="progress-title">
                             <i class="fa-solid fa-circle-notch fa-spin icon-green" id="progress-status-icon"></i>
+                            <h2>下載進度狀態</h2>
+                        </div>
+                        <button id="btn-cancel-downloads" class="btn btn-danger btn-sm">
+                            <i class="fa-solid fa-ban"></i> 取消全部下載
+                        </button>
+                    </div>
+
+                    <!-- Progress Details -->
+                    <div class="progress-details-group">
+                        <div class="progress-summary-row">
+                            <div class="progress-summary-item">
+                                <span class="summary-label">佇列中剩餘</span>
+                                <span class="summary-value" id="queue-remaining">0</span>
+                            </div>
+                            <div class="progress-summary-item">
+                                <span class="summary-label">本次已完成</span>
+                                <span class="summary-value" id="queue-completed">0</span>
+                            </div>
+                        </div>
+
+                        <!-- Active Episode Download -->
+                        <div id="active-download-container" class="active-download-box hidden">
+                            <div class="active-title-row">
+                                <span class="active-badge animate-pulse">正在下載</span>
+                                <span class="active-title" id="active-download-title">EP...</span>
+                            </div>
+                            <div class="progress-bar-container">
+                                <div class="progress-bar-fill" id="active-progress-fill" style="width: 0%;"></div>
+                            </div>
+                            <div class="active-stats-row">
+                                <span id="active-progress-percent">0%</span>
+                                <span id="active-progress-size">0 MB / 0 MB</span>
+                                <span id="active-progress-speed" class="speed-indicator"><i class="fa-solid fa-gauge-high"></i> 0 KB/s</span>
+                            </div>
+                        </div>
+                        
+                        <!-- Idle state -->
+                        <div id="download-idle-container" class="download-idle-box">
+                            <i class="fa-solid fa-circle-check icon-green large-icon"></i>
+                            <p>所有下載任務已完成或處於閒置狀態</p>
+                        </div>
+                        
+                        <!-- Tabs for Logs -->
+                        <div class="log-tabs">
+                            <button class="tab-btn active" data-tab="completed-tab">已完成 (<span id="log-completed-count">0</span>)</button>
+                            <button class="tab-btn" data-tab="failed-tab">失敗 (<span id="log-failed-count">0</span>)</button>
+                        </div>
+                        
+                        <!-- Log panels -->
+                        <div class="log-panel" id="completed-tab">
+                            <ul class="log-list" id="completed-log-list">
+                                <li class="empty-log">尚無完成的下載項目</li>
+                            </ul>
+                        </div>
+                        <div class="log-panel hidden" id="failed-tab">
+                            <ul class="log-list" id="failed-log-list">
+                                <li class="empty-log">尚無失敗的下載項目</li>
+                            </ul>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Browser Download Status Card (Static Web Mode only) -->
+                <div class="card glass-card fade-in hidden" id="browser-progress-card">
+                    <div class="card-header progress-header-flex">
+                        <div class="progress-title">
+                            <i class="fa-solid fa-circle-notch fa-spin icon-green" id="browser-progress-status-icon"></i>
                             <h2>瀏覽器批次下載狀態</h2>
                         </div>
                         <button id="btn-cancel-browser-download" class="btn btn-danger btn-sm">
@@ -193,11 +276,11 @@
         </main>
         
         <footer>
-            <p>Podcast Downloader &copy; 2026. Made with <i class="fa-solid fa-heart accent-color"></i>. Pure client-side static web utility.</p>
+            <p>Podcast Downloader &copy; 2026. Made with <i class="fa-solid fa-heart accent-color"></i>. Dual-mode Podcast Downloader Utility.</p>
         </footer>
     </div>
 
     <!-- Custom JS -->
-    <script src="app.js?v=1.3"></script>
+    <script src="app.js?v=1.4"></script>
 </body>
 </html>
