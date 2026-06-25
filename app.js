@@ -91,7 +91,9 @@ async function fetchWithProxy(url) {
     // 1. Try corsproxy.io first (fast, reliable, and supports CORS)
     try {
         console.log("嘗試使用 corsproxy.io 解析...");
-        const response = await fetchWithTimeout(`https://corsproxy.io/?${encodeURIComponent(url)}`, {}, 8000);
+        // corsproxy.io requires protocol and slashes to remain unencoded (safe='/')
+        const partiallyEncoded = encodeURIComponent(url).replace(/%2F/g, '/');
+        const response = await fetchWithTimeout(`https://corsproxy.io/?${partiallyEncoded}`, {}, 8000);
         if (response.ok) {
             const text = await response.text();
             if (text && text.trim().length > 0) {
