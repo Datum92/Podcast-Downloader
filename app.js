@@ -74,16 +74,43 @@ window.addEventListener("DOMContentLoaded", () => {
 
 // ----------------- CORS PROXY FETCHING -----------------
 
-function fetchWithProxy(url) {
+async function fetchWithProxy(url) {
+    const fetchWithTimeout = async (targetUrl, options = {}, timeout = 8000) => {
+        const controller = new AbortController();
+        const id = setTimeout(() => controller.abort(), timeout);
+        try {
+            const response = await fetch(targetUrl, { ...options, signal: controller.signal });
+            clearTimeout(id);
+            return response;
+        } catch (e) {
+            clearTimeout(id);
+            throw e;
+        }
+    };
+
+    // 1. Try corsproxy.io first (fast, reliable, and supports CORS)
+    try {
+        console.log("嘗試使用 corsproxy.io 解析...");
+        const response = await fetchWithTimeout(`https://corsproxy.io/?${encodeURIComponent(url)}`, {}, 8000);
+        if (response.ok) {
+            const text = await response.text();
+            if (text && text.trim().length > 0) {
+                console.log("corsproxy.io 解析成功");
+                return text;
+            }
+        }
+    } catch (e) {
+        console.warn("corsproxy.io 失敗，嘗試備用方案 AllOrigins...", e);
+    }
+
+    // 2. Fallback to allorigins JSONP (works in all environments, including local file:///)
+    console.log("嘗試使用 AllOrigins JSONP 備用解析...");
     return new Promise((resolve, reject) => {
-        // Create a unique callback name
         const callbackName = 'allorigins_' + Math.random().toString(36).substring(2, 11);
-        
-        // Timeout handling (15 seconds)
         const timeoutId = setTimeout(() => {
             cleanup();
-            reject(new Error("代理伺服器連線逾時，請檢查網址或稍後再試。"));
-        }, 15000);
+            reject(new Error("所有代理伺服器均連線逾時，請確認網址正確或稍後重試。"));
+        }, 12000);
         
         function cleanup() {
             clearTimeout(timeoutId);
@@ -94,21 +121,19 @@ function fetchWithProxy(url) {
             }
         }
         
-        // Define global callback
         window[callbackName] = function(data) {
             cleanup();
             if (data && data.contents) {
+                console.log("AllOrigins JSONP 解析成功");
                 resolve(data.contents);
             } else {
-                reject(new Error("代理伺服器未返回內容，請確認網址正確性。"));
+                reject(new Error("所有代理伺服器解析失敗，請確認網際網路連線或稍後再試。"));
             }
         };
         
-        // Inject script tag for JSONP (bypasses local file:/// origin CORS)
         const script = document.createElement("script");
         script.id = callbackName;
         script.src = `https://api.allorigins.win/get?url=${encodeURIComponent(url)}&callback=${callbackName}`;
-        
         script.onerror = function() {
             cleanup();
             reject(new Error("連線代理伺服器失敗，請檢查您的網路連線。"));
@@ -244,13 +269,23 @@ async function parseApplePodcastUrl(htmlText, url) {
     const parser = new DOMParser();
     const doc = parser.parseFromString(htmlText, "text/html");
     
-    // Find script with id serialized-server-data
+    // Find script with id serialized-server-data (Try DOMParser first, then fallback to regex)
+    let serverDataText = "";
     const scriptEl = doc.getElementById("serialized-server-data");
-    if (!scriptEl) {
+    if (scriptEl) {
+        serverDataText = scriptEl.textContent.trim();
+    } else {
+        const match = htmlText.match(/<script\b[^>]*id="serialized-server-data"[^>]*>([\s\S]*?)<\/script>/);
+        if (match) {
+            serverDataText = match[1].trim();
+        }
+    }
+    
+    if (!serverDataText) {
         throw new Error("無法在頁面中解析 serialized-server-data 腳本。請確認是否為正確的 Apple Podcasts 網址。");
     }
     
-    const serverData = JSON.parse(scriptEl.textContent.trim());
+    const serverData = JSON.parse(serverDataText);
     
     // Check if it's an episode link
     const match = url.match(/[?&]i=(\d+)/);
