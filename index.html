@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Podcast 語音下載工具</title>
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=Noto+Sans+TC:wght@300;400;500;700&display=swap" rel="stylesheet">
+    <!-- FontAwesome for Icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <!-- Custom CSS -->
+    <link rel="stylesheet" href="app.css">
+</head>
+<body>
+    <div class="glass-bg"></div>
+    <div class="app-container">
+        <!-- Header -->
+        <header>
+            <div class="logo">
+                <i class="fa-solid fa-podcast logo-icon"></i>
+                <h1>Podcast Downloader</h1>
+            </div>
+            <p class="subtitle">下載 Apple Podcasts 與 RSS 音檔，支援單集及批次下載</p>
+        </header>
+
+        <!-- Main Workspace -->
+        <main class="grid-layout">
+            
+            <!-- Left Side: Input & Show Details -->
+            <section class="left-panel">
+                <!-- URL Input Card -->
+                <div class="card glass-card fade-in" id="input-card">
+                    <div class="card-header">
+                        <i class="fa-solid fa-link icon-blue"></i>
+                        <h2>輸入 Podcast 網址</h2>
+                    </div>
+                    <div class="input-group">
+                        <input type="text" id="podcast-url" placeholder="貼上 Apple Podcasts (單集/節目) 或 RSS 網址..." autocomplete="off">
+                        <button id="btn-parse" class="btn btn-primary">
+                            <span class="btn-text">解析網址</span>
+                            <i class="fa-solid fa-wand-magic-sparkles spinner-icon"></i>
+                        </button>
+                    </div>
+                    <div id="parse-loading" class="loading-container hidden">
+                        <div class="spinner"></div>
+                        <p id="parse-loading-text">正在解析網址，請稍候...</p>
+                    </div>
+                    <div id="parse-error" class="error-banner hidden">
+                        <i class="fa-solid fa-circle-exclamation"></i>
+                        <span id="error-message">錯誤訊息</span>
+                    </div>
+                </div>
+
+                <!-- Show Details Card -->
+                <div class="card glass-card fade-in hidden" id="show-card">
+                    <div class="show-layout">
+                        <img id="show-image" src="" alt="Podcast Cover" class="show-cover">
+                        <div class="show-meta">
+                            <span class="badge" id="badge-type">節目</span>
+                            <h2 id="show-title">節目名稱</h2>
+                            <p class="show-author" id="show-author">創作者</p>
+                            <p class="show-desc" id="show-desc">描述資訊...</p>
+                            
+                            <!-- Single Episode load full show suggestion -->
+                            <div id="single-episode-suggestion" class="suggestion-box hidden">
+                                <p><i class="fa-solid fa-circle-info"></i> 您目前貼上的是<strong>單一單集</strong>連結。</p>
+                                <button id="btn-load-full-show" class="btn btn-secondary btn-sm">
+                                    <i class="fa-solid fa-arrows-spin"></i> 載入整檔節目 (所有集數)
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Destination Folder Card -->
+                <div class="card glass-card fade-in hidden" id="download-dir-card">
+                    <div class="card-header">
+                        <i class="fa-solid fa-folder-open icon-purple"></i>
+                        <h2>下載儲存設定</h2>
+                    </div>
+                    <div class="folder-group">
+                        <label for="download-dir">儲存路徑 (本地目錄):</label>
+                        <input type="text" id="download-dir" placeholder="C:\Users\user\Downloads\Podcasts" value="">
+                        <p class="folder-tip"><i class="fa-solid fa-circle-info"></i> 程式會為此節目自動建立子目錄。</p>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Right Side: Episodes & Download Status -->
+            <section class="right-panel">
+                
+                <!-- Episodes Card -->
+                <div class="card glass-card fade-in hidden" id="episodes-card">
+                    <div class="episodes-header">
+                        <div class="episodes-title-group">
+                            <i class="fa-solid fa-list-ul icon-indigo"></i>
+                            <h2>單集清單 <span id="episode-count">(0)</span></h2>
+                        </div>
+                        <div class="search-box">
+                            <i class="fa-solid fa-magnifying-glass"></i>
+                            <input type="text" id="episode-search" placeholder="搜尋集數標題...">
+                        </div>
+                    </div>
+
+                    <!-- Batch operations -->
+                    <div class="batch-controls">
+                        <button id="btn-select-all" class="btn btn-text-icon"><i class="fa-regular fa-square-check"></i> 全選</button>
+                        <button id="btn-select-none" class="btn btn-text-icon"><i class="fa-regular fa-square"></i> 取消全選</button>
+                        <button id="btn-select-latest-10" class="btn btn-text-icon"><i class="fa-solid fa-clock"></i> 最新 10 集</button>
+                        <button id="btn-select-latest-50" class="btn btn-text-icon"><i class="fa-solid fa-list-numeric"></i> 最新 50 集</button>
+                    </div>
+
+                    <!-- List Container -->
+                    <div class="table-container">
+                        <table class="episodes-table">
+                            <thead>
+                                <tr>
+                                    <th width="40"><input type="checkbox" id="header-select-all"></th>
+                                    <th width="100">發佈日期</th>
+                                    <th>集數標題</th>
+                                    <th width="90">時長</th>
+                                </tr>
+                            </thead>
+                            <tbody id="episodes-list">
+                                <!-- Dynamic rows -->
+                            </tbody>
+                        </table>
+                    </div>
+                    
+                    <!-- Action Bar -->
+                    <div class="action-bar">
+                        <div class="selected-summary">
+                            已選擇 <strong id="selected-count" class="accent-color">0</strong> / <span id="total-count">0</span> 集
+                        </div>
+                        <button id="btn-start-download" class="btn btn-success btn-large" disabled>
+                            <i class="fa-solid fa-cloud-arrow-down"></i> 開始下載已選集數
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Download Progress Card -->
+                <div class="card glass-card fade-in hidden" id="progress-card">
+                    <div class="card-header progress-header-flex">
+                        <div class="progress-title">
+                            <i class="fa-solid fa-circle-notch fa-spin icon-green" id="progress-status-icon"></i>
+                            <h2>下載進度狀態</h2>
+                        </div>
+                        <button id="btn-cancel-downloads" class="btn btn-danger btn-sm">
+                            <i class="fa-solid fa-ban"></i> 取消全部下載
+                        </button>
+                    </div>
+
+                    <!-- Progress Details -->
+                    <div class="progress-details-group">
+                        
+                        <!-- Queue summary -->
+                        <div class="progress-summary-row">
+                            <div class="progress-summary-item">
+                                <span class="summary-label">佇列中剩餘</span>
+                                <span class="summary-value" id="queue-remaining">0</span>
+                            </div>
+                            <div class="progress-summary-item">
+                                <span class="summary-label">本次已完成</span>
+                                <span class="summary-value" id="queue-completed">0</span>
+                            </div>
+                        </div>
+
+                        <!-- Active Episode Download -->
+                        <div id="active-download-container" class="active-download-box hidden">
+                            <div class="active-title-row">
+                                <span class="active-badge animate-pulse">正在下載</span>
+                                <span class="active-title" id="active-download-title">EP...</span>
+                            </div>
+                            <div class="progress-bar-container">
+                                <div class="progress-bar-fill" id="active-progress-fill" style="width: 0%;"></div>
+                            </div>
+                            <div class="active-stats-row">
+                                <span id="active-progress-percent">0%</span>
+                                <span id="active-progress-size">0 MB / 0 MB</span>
+                                <span id="active-progress-speed" class="speed-indicator"><i class="fa-solid fa-gauge-high"></i> 0 KB/s</span>
+                            </div>
+                        </div>
+                        
+                        <!-- Idle state -->
+                        <div id="download-idle-container" class="download-idle-box">
+                            <i class="fa-solid fa-circle-check icon-green large-icon"></i>
+                            <p>所有下載任務已完成或處於閒置狀態</p>
+                        </div>
+                        
+                        <!-- Tabs for Logs -->
+                        <div class="log-tabs">
+                            <button class="tab-btn active" data-tab="completed-tab">已完成 (<span id="log-completed-count">0</span>)</button>
+                            <button class="tab-btn" data-tab="failed-tab">失敗 (<span id="log-failed-count">0</span>)</button>
+                        </div>
+                        
+                        <!-- Log panels -->
+                        <div class="log-panel" id="completed-tab">
+                            <ul class="log-list" id="completed-log-list">
+                                <li class="empty-log">尚無完成的下載項目</li>
+                            </ul>
+                        </div>
+                        <div class="log-panel hidden" id="failed-tab">
+                            <ul class="log-list" id="failed-log-list">
+                                <li class="empty-log">尚無失敗的下載項目</li>
+                            </ul>
+                        </div>
+
+                    </div>
+                </div>
+
+            </section>
+        </main>
+        
+        <footer>
+            <p>Antigravity Podcast Downloader &copy; 2026. Made with <i class="fa-solid fa-heart accent-color"></i> for local offline listening.</p>
+        </footer>
+    </div>
+
+    <!-- Custom JS -->
+    <script src="app.js"></script>
+</body>
+</html>
