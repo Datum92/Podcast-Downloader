@@ -223,6 +223,123 @@ async function fetchWithProxy(url) {
     });
 }
 
+function fetchItunesLookupJsonp(showId, episodeId) {
+    return new Promise((resolve, reject) => {
+        const callbackName = 'itunes_' + Math.random().toString(36).substring(2, 11);
+        const timeoutId = setTimeout(() => {
+            cleanup();
+            reject(new Error("連線 Apple iTunes 服務逾時，請稍後重試。"));
+        }, 10000);
+        
+        function cleanup() {
+            clearTimeout(timeoutId);
+            delete window[callbackName];
+            const script = document.getElementById(callbackName);
+            if (script) document.body.removeChild(script);
+        }
+        
+        window[callbackName] = function(data) {
+            cleanup();
+            if (!data || !data.results || data.results.length === 0) {
+                reject(new Error("iTunes 找不到此節目的相關資訊，請確認網址或 ID 是否正確。"));
+                return;
+            }
+            
+            const show = data.results[0];
+            const episodes = [];
+            
+            for (let i = 1; i < data.results.length; i++) {
+                const ep = data.results[i];
+                if (ep.wrapperType === 'podcastEpisode') {
+                    const durationSec = ep.trackTimeMillis ? Math.floor(ep.trackTimeMillis / 1000) : 0;
+                    let durationStr = "";
+                    if (durationSec) {
+                        const m = Math.floor(durationSec / 60);
+                        const s = Math.floor(durationSec % 60);
+                        const h = Math.floor(m / 60);
+                        const remMin = m % 60;
+                        durationStr = h > 0 ? 
+                            `${h.toString().padStart(2, '0')}:${remMin.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}` : 
+                            `${remMin.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+                    }
+                    
+                    const releaseDate = ep.releaseDate || "";
+                    const formattedDate = releaseDate.length >= 10 ? releaseDate.slice(0, 10) : releaseDate;
+                    
+                    episodes.push({
+                        title: ep.trackName || "無標題單集",
+                        url: ep.episodeUrl || ep.previewUrl,
+                        date: formattedDate,
+                        duration: durationStr,
+                        description: ep.description || ""
+                    });
+                }
+            }
+            
+            if (episodeId) {
+                let targetEp = null;
+                for (let i = 1; i < data.results.length; i++) {
+                    const ep = data.results[i];
+                    if (ep.wrapperType === 'podcastEpisode' && String(ep.trackId) === String(episodeId)) {
+                        targetEp = ep;
+                        break;
+                    }
+                }
+                
+                if (targetEp) {
+                    const durationSec = targetEp.trackTimeMillis ? Math.floor(targetEp.trackTimeMillis / 1000) : 0;
+                    let durationStr = "";
+                    if (durationSec) {
+                        const m = Math.floor(durationSec / 60);
+                        const s = Math.floor(durationSec % 60);
+                        const h = Math.floor(m / 60);
+                        const remMin = m % 60;
+                        durationStr = h > 0 ? 
+                            `${h.toString().padStart(2, '0')}:${remMin.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}` : 
+                            `${remMin.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+                    }
+                    
+                    const releaseDate = targetEp.releaseDate || "";
+                    const formattedDate = releaseDate.length >= 10 ? releaseDate.slice(0, 10) : releaseDate;
+                    
+                    resolve({
+                        is_single: true,
+                        episode_id: episodeId,
+                        show_title: show.collectionName || "Apple Podcast 節目",
+                        episode_title: targetEp.trackName || "單集音檔",
+                        url: targetEp.episodeUrl || targetEp.previewUrl,
+                        date: formattedDate,
+                        duration: durationStr,
+                        image: targetEp.artworkUrl600 || show.artworkUrl600 || "",
+                        feed_url: show.feedUrl || ""
+                    });
+                    return;
+                }
+            }
+            
+            resolve({
+                is_single: false,
+                show_title: show.collectionName || "未知節目",
+                author: show.artistName || "未知創作者",
+                description: "說明資訊請以 RSS 內容為準。線上網頁版目前直接載入最新 200 集，如需載入更多歷史集數，請執行本地端 Python 伺服器。",
+                image: show.artworkUrl600 || "",
+                feed_url: show.feedUrl || "",
+                episodes: episodes
+            });
+        };
+        
+        const script = document.createElement("script");
+        script.id = callbackName;
+        script.src = `https://itunes.apple.com/lookup?id=${showId}&entity=podcastEpisode&limit=200&callback=${callbackName}`;
+        script.onerror = function() {
+            cleanup();
+            reject(new Error("查詢 iTunes 服務失敗，請確認網頁連線。"));
+        };
+        document.body.appendChild(script);
+    });
+}
+
+
 // ----------------- PARSING LOGIC (CLIENT-SIDE) -----------------
 
 function recursiveSearchKey(obj, keyToFind) {
@@ -439,6 +556,20 @@ async function resolveUrlClientSide(url) {
     if (!url) throw new Error("網址不可為空。");
     
     if (url.includes("podcasts.apple.com")) {
+        const idMatch = url.match(/\/id(\d+)/);
+        const episodeMatch = url.match(/[?&]i=(\d+)/);
+        const episodeId = episodeMatch ? episodeMatch[1] : null;
+        
+        if (idMatch) {
+            const showId = idMatch[1];
+            showParseLoading("正在從 iTunes API 載入節目資訊...");
+            try {
+                return await fetchItunesLookupJsonp(showId, episodeId);
+            } catch (jsonpErr) {
+                console.warn("iTunes JSONP Lookup 失敗，將嘗試使用 CORS 代理伺服器備用方案...", jsonpErr);
+            }
+        }
+        
         showParseLoading("正在解析 Apple Podcasts 網頁...");
         const htmlText = await fetchWithProxy(url);
         return parseApplePodcastUrl(htmlText, url);
@@ -446,19 +577,25 @@ async function resolveUrlClientSide(url) {
         showParseLoading("正在解析 RSS 訂閱源 XML...");
         const xmlText = await fetchWithProxy(url);
         return parseRssFeed(xmlText, url);
-    } else {
-        if (/^\d+$/.test(url)) {
-            showParseLoading("正在查詢 iTunes ID...");
-            const lookupUrl = `https://itunes.apple.com/lookup?id=${url}`;
-            const contents = await fetchWithProxy(lookupUrl);
-            const data = JSON.parse(contents);
-            if (data.resultCount > 0 && data.results[0].feedUrl) {
-                const feedUrl = data.results[0].feedUrl;
-                showParseLoading("成功找到 RSS 訂閱源，正在解析全集資訊...");
-                const xmlText = await fetchWithProxy(feedUrl);
-                return parseRssFeed(xmlText, feedUrl);
-            }
+    } else if (/^\d+$/.test(url)) {
+        showParseLoading("正在查詢 iTunes ID...");
+        try {
+            return await fetchItunesLookupJsonp(url, null);
+        } catch (jsonpErr) {
+            console.warn("iTunes JSONP Lookup 失敗，將嘗試使用 CORS 代理伺服器備用方案...", jsonpErr);
         }
+        
+        const lookupUrl = `https://itunes.apple.com/lookup?id=${url}`;
+        const contents = await fetchWithProxy(lookupUrl);
+        const data = JSON.parse(contents);
+        if (data.resultCount > 0 && data.results[0].feedUrl) {
+            const feedUrl = data.results[0].feedUrl;
+            showParseLoading("成功找到 RSS 訂閱源，正在解析全集資訊...");
+            const xmlText = await fetchWithProxy(feedUrl);
+            return parseRssFeed(xmlText, feedUrl);
+        }
+        throw new Error("無法查詢此 iTunes ID 的資訊。");
+    } else {
         throw new Error("不支援的網址類型。請輸入 Apple Podcasts 連結或直連 RSS XML 網址。");
     }
 }
