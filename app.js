@@ -74,18 +74,48 @@ window.addEventListener("DOMContentLoaded", () => {
 
 // ----------------- CORS PROXY FETCHING -----------------
 
-async function fetchWithProxy(url) {
-    // Using allorigins.win proxy which is free and open
-    const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(url)}`;
-    const response = await fetch(proxyUrl);
-    if (!response.ok) {
-        throw new Error("連線代理伺服器失敗，請稍後重試。");
-    }
-    const data = await response.json();
-    if (!data.contents) {
-        throw new Error("未能讀取目標網頁內容。");
-    }
-    return data.contents;
+function fetchWithProxy(url) {
+    return new Promise((resolve, reject) => {
+        // Create a unique callback name
+        const callbackName = 'allorigins_' + Math.random().toString(36).substring(2, 11);
+        
+        // Timeout handling (15 seconds)
+        const timeoutId = setTimeout(() => {
+            cleanup();
+            reject(new Error("代理伺服器連線逾時，請檢查網址或稍後再試。"));
+        }, 15000);
+        
+        function cleanup() {
+            clearTimeout(timeoutId);
+            delete window[callbackName];
+            const script = document.getElementById(callbackName);
+            if (script) {
+                document.body.removeChild(script);
+            }
+        }
+        
+        // Define global callback
+        window[callbackName] = function(data) {
+            cleanup();
+            if (data && data.contents) {
+                resolve(data.contents);
+            } else {
+                reject(new Error("代理伺服器未返回內容，請確認網址正確性。"));
+            }
+        };
+        
+        // Inject script tag for JSONP (bypasses local file:/// origin CORS)
+        const script = document.createElement("script");
+        script.id = callbackName;
+        script.src = `https://api.allorigins.win/get?url=${encodeURIComponent(url)}&callback=${callbackName}`;
+        
+        script.onerror = function() {
+            cleanup();
+            reject(new Error("連線代理伺服器失敗，請檢查您的網路連線。"));
+        };
+        
+        document.body.appendChild(script);
+    });
 }
 
 // ----------------- PARSING LOGIC (CLIENT-SIDE) -----------------
