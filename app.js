@@ -145,8 +145,15 @@ function formatBytes(bytes, decimals = 2) {
 // ----------------- DUAL-PROXY FETCHING (STATIC WEB MODE) -----------------
 
 async function fetchWithProxy(url) {
+    // Decode first to prevent double-encoding
+    let decodedUrl = url;
+    try {
+        decodedUrl = decodeURIComponent(url);
+    } catch (e) {
+        console.warn("URL decoding failed:", e);
+    }
     // Both corsproxy.io and AllOrigins require slashes and protocols to remain unencoded (safe='/')
-    const partiallyEncoded = encodeURIComponent(url).replace(/%2F/g, '/');
+    const partiallyEncoded = encodeURIComponent(decodedUrl).replace(/%2F/g, '/');
 
     const fetchWithTimeout = async (targetUrl, options = {}, timeout = 8000) => {
         const controller = new AbortController();
@@ -843,6 +850,17 @@ function copySelectedLinks() {
 
 function startBrowserBatchDownload() {
     if (selectedEpisodes.size === 0) return;
+    
+    const confirmMsg = "【瀏覽器下載重要提醒】\n\n" +
+        "1. 您目前正在使用「線上網頁模式」，由於瀏覽器安全限制 (CORS/沙盒機制)，網頁無法直接將檔案存入您指定的本機資料夾中。\n" +
+        "2. 點擊確定後，瀏覽器將開啟新分頁並載入音檔。如果該音檔伺服器不支援直連下載，瀏覽器預設會在新分頁「開啟播放」而非自動存檔，您需要在播放頁面點擊右鍵選擇「另存新檔」，或請在瀏覽器設定中允許此站台「彈出多個視窗與下載」。\n\n" +
+        "※ 建議方案：\n" +
+        "👉 點選「複製已選 MP3 下載連結」，並貼入下載軟體 (如 JDownloader 或 IDM) 進行全自動批次下載。\n" +
+        "👉 執行本地端 Python 伺服器 (在專案資料夾執行 python app.py) 並使用 localhost 網頁，即可享受「直接自動下載到實體資料夾」的功能。\n\n" +
+        "確定要繼續在瀏覽器中開啟新分頁播放/下載嗎？";
+        
+    if (!confirm(confirmMsg)) return;
+    
     batchDownloadQueue = Array.from(selectedEpisodes);
     batchDownloadIndex = 0;
     isBatchDownloading = true;

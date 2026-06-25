@@ -37,6 +37,25 @@ def get_headers():
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
 
+def safe_encode_url(url):
+    """Safely encode a URL that may contain non-ASCII characters or be already percent-encoded."""
+    try:
+        decoded_url = urllib.parse.unquote(url)
+        parts = urllib.parse.urlparse(decoded_url)
+        path = urllib.parse.quote(parts.path)
+        query = urllib.parse.quote(parts.query, safe='=&')
+        return urllib.parse.urlunparse((
+            parts.scheme,
+            parts.netloc,
+            path,
+            parts.params,
+            query,
+            parts.fragment
+        ))
+    except Exception:
+        return url
+
+
 def sanitize_filename(name):
     """Sanitizes filename for Windows filesystem."""
     invalid_chars = r'[\\/:*?"<>|]'
@@ -70,7 +89,7 @@ def recursive_search_keys(obj, keys_list):
     return results
 
 def parse_rss_feed(feed_url):
-    req = urllib.request.Request(feed_url, headers=get_headers())
+    req = urllib.request.Request(safe_encode_url(feed_url), headers=get_headers())
     with urllib.request.urlopen(req, timeout=20) as response:
         xml_data = response.read()
     
@@ -146,7 +165,7 @@ def parse_apple_podcast_url(url):
     query_params = urllib.parse.parse_qs(parsed_url.query)
     episode_id = query_params.get("i", [None])[0]
     
-    req = urllib.request.Request(url, headers=get_headers())
+    req = urllib.request.Request(safe_encode_url(url), headers=get_headers())
     with urllib.request.urlopen(req, timeout=20) as response:
         html = response.read().decode("utf-8")
         
@@ -243,7 +262,7 @@ def resolve_url(url):
     else:
         if url.isdigit():
             lookup_url = f"https://itunes.apple.com/lookup?id={url}"
-            req = urllib.request.Request(lookup_url, headers=get_headers())
+            req = urllib.request.Request(safe_encode_url(lookup_url), headers=get_headers())
             with urllib.request.urlopen(req, timeout=20) as response:
                 data = json.loads(response.read().decode())
                 if data.get("resultCount", 0) > 0:
@@ -284,7 +303,7 @@ def download_worker():
                 "percent": 0
             }
             
-        req = urllib.request.Request(url, headers=get_headers())
+        req = urllib.request.Request(safe_encode_url(url), headers=get_headers())
         success = False
         error_msg = ""
         
