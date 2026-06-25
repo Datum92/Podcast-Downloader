@@ -75,6 +75,9 @@ window.addEventListener("DOMContentLoaded", () => {
 // ----------------- CORS PROXY FETCHING -----------------
 
 async function fetchWithProxy(url) {
+    // Both corsproxy.io and AllOrigins require slashes and protocols to remain unencoded (safe='/')
+    const partiallyEncoded = encodeURIComponent(url).replace(/%2F/g, '/');
+
     const fetchWithTimeout = async (targetUrl, options = {}, timeout = 8000) => {
         const controller = new AbortController();
         const id = setTimeout(() => controller.abort(), timeout);
@@ -91,8 +94,6 @@ async function fetchWithProxy(url) {
     // 1. Try corsproxy.io first (fast, reliable, and supports CORS)
     try {
         console.log("嘗試使用 corsproxy.io 解析...");
-        // corsproxy.io requires protocol and slashes to remain unencoded (safe='/')
-        const partiallyEncoded = encodeURIComponent(url).replace(/%2F/g, '/');
         const response = await fetchWithTimeout(`https://corsproxy.io/?${partiallyEncoded}`, {}, 8000);
         if (response.ok) {
             const text = await response.text();
@@ -135,7 +136,7 @@ async function fetchWithProxy(url) {
         
         const script = document.createElement("script");
         script.id = callbackName;
-        script.src = `https://api.allorigins.win/get?url=${encodeURIComponent(url)}&callback=${callbackName}`;
+        script.src = `https://api.allorigins.win/get?url=${partiallyEncoded}&callback=${callbackName}`;
         script.onerror = function() {
             cleanup();
             reject(new Error("連線代理伺服器失敗，請檢查您的網路連線。"));
