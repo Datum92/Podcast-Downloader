@@ -1,47 +1,41 @@
-# Podcast Downloader
+# Podcast Downloader (GitHub Pages 靜態版)
 
-一個現代化、零依賴（Zero-dependency）且外觀精美的 Podcast 本地音檔下載工具。結合了 Python 的強大下載能力與 HTML/CSS/JS 的 Glassmorphism 卡片風格暗色調網頁介面。
+一個完全執行於瀏覽器前端、**免安裝任何後端**且外觀精美的 Podcast 音檔解析與下載工具。支援部署至 GitHub Pages 永久免費線上運作！
 
 ## 🌟 特色功能
 
-- 🎨 **現代化網頁介面**：使用 HSL 調色盤、玻璃擬態（Glassmorphism）與流暢的微動畫設計。
-- ⚡ **零套件依賴**：完全基於 Python 標準庫開發，不需執行 `pip install` 安裝任何額外套件。
-- 🔍 **強大解析支援**：
+- 🎨 **現代化網頁介面**：使用 HSL 顏色、玻璃擬態（Glassmorphism）與流暢的微動畫設計。
+- ☁️ **純前端運作 (Serverless)**：利用免費公開的 CORS 代理伺服器（Allorigins）直接在網頁端抓取並解析網址，免去本地執行 Python 的麻煩。
+- 🔍 **支援解析網址**：
   - 支援 Apple Podcasts 節目與單集網址解析。
   - 支援直接輸入 Podcast RSS XML 訂閱源網址。
-  - 當輸入單集網址時，會自動提示是否要「載入整檔節目（所有集數）」。
+  - 輸入單集網址時，會自動提示是否要「載入整檔節目（所有集數）」。
 - 🗂️ **批次下載與篩選**：
   - 支援關鍵字搜尋過濾單集。
   - 快速鍵批次選擇（全選、反選、最新 10/50 集）。
-  - 自動以 `[YYYY-MM-DD] 單集名稱.mp3` 的格式命名，便於在檔案總管中按日期排序。
-- ⚙️ **穩定性防護**：
-  - **自動逾時 (Timeout)**：設定 20 秒逾時機制，避免下載卡住。若單集失敗會自動跳過並繼續下載佇列中的下一集。
-  - **頻率限制防護 (Polite Sleep)**：單集下載間隔 1 秒，防範被託管伺服器（例如 SoundOn）阻擋或封鎖。
+  - 單集清單支援複製單集連結、單集瀏覽器下載。
+- 🛠️ **多種批量下載工具**：
+  - **複製下載連結 (推薦 👍)**：一鍵複製所有已勾選單集的 MP3 連結。打開下載軟體（如 JDownloader 或 IDM）即可自動偵測並以最大頻寬下載，最適合備份整檔節目。
+  - **瀏覽器直接下載**：依序調用瀏覽器下載已選項目。*(使用前請在瀏覽器設定中允許此站台多重下載)*
 
 ---
 
-## 🚀 快速開始
+## 🚀 啟用 GitHub Pages (讓網頁永久上線)
 
-### 1. 複製並下載專案
-將本專案複製到您的電腦本地目錄。
+由於此版本是純靜態網頁，您可以直接使用 GitHub 免費的 Pages 服務將其發佈上線：
 
-### 2. 執行伺服器
-在專案目錄下開啟終端機（PowerShell / CMD），執行：
-```bash
-python app.py
-```
+1. 前往您 GitHub 上的 Repository 頁面：`https://github.com/Datum92/Podcast-Downloader`
+2. 點擊上方的 **Settings** (設定) 頁籤。
+3. 在左側選單中找到 **Pages** 項目。
+4. 在 **Build and deployment** 底下的 **Source** 選擇 `Deploy from a branch`。
+5. 在 **Branch** 底下選擇 `main` (或 `master`) 分支，目錄保持 `/ (root)`，點擊 **Save**。
+6. 稍等 1-2 分鐘後重新整理頁面，最上方會出現您的專屬線上網址（例如：`https://datum92.github.io/Podcast-Downloader/`）。
 
-### 3. 使用程式
-伺服器啟動後，會**自動在您的預設瀏覽器中開啟** `http://localhost:8990/`：
-1. 在輸入框中貼上 Podcast 網址（例如 Apple Podcasts 節目連結）。
-2. 點擊 **「解析網址」**。
-3. 勾選欲下載的集數（可搭配搜尋過濾或批次選擇按鈕）。
-4. 設定本地儲存路徑（預設會下載至您的 `Downloads/Podcasts` 目錄）。
-5. 點擊 **「開始下載已選集數」**，即可在右側即時看見下載速度與進度條！
+現在，任何人隨時隨地都可以透過該網址在瀏覽器中直接解析並下載 Podcast 了！
 
 ---
 
 ## 🛠️ 技術架構
 
-- **Backend**: Python 3 (使用 `http.server.ThreadingHTTPServer` 作為多執行緒伺服器，`urllib` 進行無 CORS 限制的下載，`xml.etree.ElementTree` 進行 RSS 訂閱源解析)。
-- **Frontend**: HTML5, Vanilla CSS3 (自訂變數, Glassmorphism, 響應式佈局), Vanilla JavaScript (狀態管理與 API 輪詢)。
+- **Frontend**: HTML5, Vanilla CSS3 (自訂變數, Glassmorphism, 響應式佈局), Vanilla JavaScript (DOMParser XML 解析, Allorigins API CORS 代理)。
+- **Zero Backend**: 不需要任何後端伺服器或資料庫。

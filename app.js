@@ -2,8 +2,10 @@
 let podcastData = null;
 let selectedEpisodes = new Set();
 let searchQuery = "";
-let isPolling = false;
-let pollIntervalId = null;
+let isBatchDownloading = false;
+let batchDownloadQueue = [];
+let batchDownloadIndex = 0;
+let batchDownloadInterval = null;
 
 // DOM Elements
 const elUrlInput = document.getElementById("podcast-url");
@@ -22,8 +24,9 @@ const elShowDesc = document.getElementById("show-desc");
 const elSingleEpisodeSuggestion = document.getElementById("single-episode-suggestion");
 const elBtnLoadFullShow = document.getElementById("btn-load-full-show");
 
-const elDownloadDirCard = document.getElementById("download-dir-card");
-const elDownloadDirInput = document.getElementById("download-dir");
+const elDownloadToolsCard = document.getElementById("download-tools-card");
+const elBtnCopyLinks = document.getElementById("btn-copy-links");
+const elBtnBrowserDownload = document.getElementById("btn-browser-download");
 
 const elEpisodesCard = document.getElementById("episodes-card");
 const elEpisodeCount = document.getElementById("episode-count");
@@ -36,32 +39,16 @@ const elHeaderSelectAll = document.getElementById("header-select-all");
 const elEpisodesList = document.getElementById("episodes-list");
 const elSelectedCount = document.getElementById("selected-count");
 const elTotalCount = document.getElementById("total-count");
-const elBtnStartDownload = document.getElementById("btn-start-download");
 
-const elProgressCard = document.getElementById("progress-card");
-const elBtnCancelDownloads = document.getElementById("btn-cancel-downloads");
-const elProgressStatusIcon = document.getElementById("progress-status-icon");
-const elQueueRemaining = document.getElementById("queue-remaining");
-const elQueueCompleted = document.getElementById("queue-completed");
-const elActiveDownloadContainer = document.getElementById("active-download-container");
-const elActiveDownloadTitle = document.getElementById("active-download-title");
-const elActiveProgressFill = document.getElementById("active-progress-fill");
-const elActiveProgressPercent = document.getElementById("active-progress-percent");
-const elActiveProgressSize = document.getElementById("active-progress-size");
-const elActiveProgressSpeed = document.getElementById("active-progress-speed");
-const elDownloadIdleContainer = document.getElementById("download-idle-container");
-
-const elLogCompletedCount = document.getElementById("log-completed-count");
-const elLogFailedCount = document.getElementById("log-failed-count");
-const elCompletedLogList = document.getElementById("completed-log-list");
-const elFailedLogList = document.getElementById("failed-log-list");
+const elBrowserProgressCard = document.getElementById("browser-progress-card");
+const elBtnCancelBrowserDownload = document.getElementById("btn-cancel-browser-download");
+const elBrowserQueueRemaining = document.getElementById("browser-queue-remaining");
+const elBrowserQueueCompleted = document.getElementById("browser-queue-completed");
+const elBrowserActiveTitle = document.getElementById("browser-active-title");
+const elBrowserProgressFill = document.getElementById("browser-progress-fill");
 
 // Initialize Setup
 window.addEventListener("DOMContentLoaded", () => {
-    // Determine default base path based on Windows path separator
-    const defaultBaseDir = "C:\\Users\\user\\Downloads\\Podcasts";
-    elDownloadDirInput.value = defaultBaseDir;
-    
     // Add Event Listeners
     elBtnParse.addEventListener("click", handleParse);
     elUrlInput.addEventListener("keydown", (e) => {
@@ -79,35 +66,296 @@ window.addEventListener("DOMContentLoaded", () => {
     elBtnSelectLatest50.addEventListener("click", () => selectLatestN(50));
     elHeaderSelectAll.addEventListener("change", toggleHeaderSelectAll);
     
-    elBtnStartDownload.addEventListener("click", startSelectedDownloads);
-    elBtnCancelDownloads.addEventListener("click", cancelDownloads);
+    elBtnCopyLinks.addEventListener("click", copySelectedLinks);
+    elBtnBrowserDownload.addEventListener("click", startBrowserBatchDownload);
+    elBtnCancelBrowserDownload.addEventListener("click", stopBrowserBatchDownload);
     elBtnLoadFullShow.addEventListener("click", loadFullShowFromEpisode);
-    
-    // Tab switching for logs
-    document.querySelectorAll(".tab-btn").forEach(btn => {
-        btn.addEventListener("click", (e) => {
-            document.querySelectorAll(".tab-btn").forEach(b => b.classList.remove("active"));
-            document.querySelectorAll(".log-panel").forEach(p => p.classList.add("hidden"));
-            
-            btn.classList.add("active");
-            const activeTabId = btn.getAttribute("data-tab");
-            document.getElementById(activeTabId).classList.remove("hidden");
-        });
-    });
-    
-    // Check initial downloader status (in case server restarted during download)
-    checkDownloaderStatus();
 });
 
-// Helper: Format Bytes to Human Readable (KB, MB, GB)
-function formatBytes(bytes, decimals = 2) {
-    if (bytes === 0) return '0 Bytes';
-    const k = 1024;
-    const dm = decimals < 0 ? 0 : decimals;
-    const sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB'];
-    const i = Math.floor(Math.log(bytes) / Math.log(k));
-    return parseFloat((bytes / Math.pow(k, i)).toFixed(dm)) + ' ' + sizes[i];
+// ----------------- CORS PROXY FETCHING -----------------
+
+async function fetchWithProxy(url) {
+    // Using allorigins.win proxy which is free and open
+    const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(url)}`;
+    const response = await fetch(proxyUrl);
+    if (!response.ok) {
+        throw new Error("連線代理伺服器失敗，請稍後重試。");
+    }
+    const data = await response.json();
+    if (!data.contents) {
+        throw new Error("未能讀取目標網頁內容。");
+    }
+    return data.contents;
 }
+
+// ----------------- PARSING LOGIC (CLIENT-SIDE) -----------------
+
+function recursiveSearchKey(obj, keyToFind) {
+    let results = [];
+    if (typeof obj === 'object' && obj !== null) {
+        if (Array.isArray(obj)) {
+            for (let item of obj) {
+                results = results.concat(recursiveSearchKey(item, keyToFind));
+            }
+        } else {
+            for (let [k, v] of Object.entries(obj)) {
+                if (k === keyToFind) {
+                    results.push(v);
+                }
+                results = results.concat(recursiveSearchKey(v, keyToFind));
+            }
+        }
+    }
+    return results;
+}
+
+function recursiveSearchKeys(obj, keysList) {
+    let results = [];
+    if (typeof obj === 'object' && obj !== null) {
+        if (Array.isArray(obj)) {
+            for (let item of obj) {
+                results = results.concat(recursiveSearchKeys(item, keysList));
+            }
+        } else {
+            const hasAllKeys = keysList.every(k => k in obj);
+            if (hasAllKeys) {
+                results.push(obj);
+            }
+            for (let v of Object.values(obj)) {
+                results = results.concat(recursiveSearchKeys(v, keysList));
+            }
+        }
+    }
+    return results;
+}
+
+function parseRssFeed(xmlText, feedUrl) {
+    const parser = new DOMParser();
+    const xmlDoc = parser.parseFromString(xmlText, "text/xml");
+    
+    // Check parse error
+    const parserError = xmlDoc.querySelector("parsererror");
+    if (parserError) {
+        throw new Error("RSS XML 解析出錯。");
+    }
+    
+    const channel = xmlDoc.querySelector("channel");
+    if (!channel) {
+        throw new Error("找不到 RSS 的 <channel> 節點。");
+    }
+    
+    // Extract metadata
+    const showTitle = channel.getElementsByTagName("title")[0]?.textContent || "未知節目";
+    const author = channel.getElementsByTagName("itunes:author")[0]?.textContent || 
+                   channel.getElementsByTagName("author")[0]?.textContent || "";
+    const description = channel.getElementsByTagName("description")[0]?.textContent || "";
+    
+    let showImage = "";
+    const imageEl = channel.getElementsByTagName("image")[0];
+    if (imageEl) {
+        showImage = imageEl.getElementsByTagName("url")[0]?.textContent || "";
+    }
+    if (!showImage) {
+        const itunesImage = channel.getElementsByTagName("itunes:image")[0];
+        showImage = itunesImage?.getAttribute("href") || "";
+    }
+    
+    const episodes = [];
+    const items = channel.getElementsByTagName("item");
+    
+    for (let item of items) {
+        const title = item.getElementsByTagName("title")[0]?.textContent || "無標題單集";
+        
+        const enclosure = item.getElementsByTagName("enclosure")[0];
+        if (!enclosure) continue;
+        const audioUrl = enclosure.getAttribute("url");
+        if (!audioUrl) continue;
+        
+        const pubDateRaw = item.getElementsByTagName("pubDate")[0]?.textContent || "";
+        let formattedDate = "";
+        if (pubDateRaw) {
+            try {
+                const dateObj = new Date(pubDateRaw);
+                if (!isNaN(dateObj)) {
+                    formattedDate = dateObj.toISOString().split('T')[0];
+                } else {
+                    formattedDate = pubDateRaw;
+                }
+            } catch(e) {
+                formattedDate = pubDateRaw;
+            }
+        }
+        
+        const duration = item.getElementsByTagName("itunes:duration")[0]?.textContent || 
+                         item.getElementsByTagName("duration")[0]?.textContent || "";
+        const desc = item.getElementsByTagName("description")[0]?.textContent || "";
+        
+        episodes.push({
+            title: title,
+            url: audioUrl,
+            date: formattedDate,
+            duration: duration,
+            description: desc
+        });
+    }
+    
+    return {
+        is_single: false,
+        show_title: showTitle,
+        author: author,
+        description: description,
+        image: showImage,
+        feed_url: feedUrl,
+        episodes: episodes
+    };
+}
+
+async function parseApplePodcastUrl(htmlText, url) {
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(htmlText, "text/html");
+    
+    // Find script with id serialized-server-data
+    const scriptEl = doc.getElementById("serialized-server-data");
+    if (!scriptEl) {
+        throw new Error("無法在頁面中解析 serialized-server-data 腳本。請確認是否為正確的 Apple Podcasts 網址。");
+    }
+    
+    const serverData = JSON.parse(scriptEl.textContent.trim());
+    
+    // Check if it's an episode link
+    const match = url.match(/[?&]i=(\d+)/);
+    const episodeId = match ? match[1] : null;
+    
+    if (episodeId) {
+        // Episode Page
+        const episodesData = recursiveSearchKeys(serverData, ["streamUrl", "title"]);
+        if (episodesData.length === 0) {
+            // Fallback to streamUrl
+            const streamUrls = recursiveSearchKey(serverData, "streamUrl");
+            if (streamUrls.length === 0) {
+                throw new Error("無法從此單集頁面解析音檔網址。");
+            }
+            return {
+                is_single: true,
+                episode_id: episodeId,
+                show_title: "Apple Podcast 節目",
+                episode_title: doc.title || "單集音檔",
+                url: streamUrls[0],
+                date: "",
+                duration: "",
+                image: "",
+                feed_url: ""
+            };
+        }
+        
+        // Find matching item or default to first
+        let ep = episodesData[0];
+        for (let item of episodesData) {
+            if (String(item.contentId) === String(episodeId)) {
+                ep = item;
+                break;
+            }
+        }
+        
+        const title = ep.title || "無標題單集";
+        const streamUrl = ep.streamUrl;
+        
+        // Duration
+        const durationSec = ep.duration || 0;
+        let durationStr = "";
+        if (durationSec) {
+            const m = Math.floor(durationSec / 60);
+            const s = Math.floor(durationSec % 60);
+            const h = Math.floor(m / 60);
+            const remMin = m % 60;
+            durationStr = h > 0 ? 
+                `${h.toString().padStart(2, '0')}:${remMin.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}` : 
+                `${remMin.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+        }
+        
+        // Date
+        const releaseDate = ep.releaseDate || "";
+        const formattedDate = releaseDate.length >= 10 ? releaseDate.slice(0, 10) : releaseDate;
+        
+        // Artwork image template
+        let imageUrl = "";
+        const artwork = ep.artwork;
+        if (artwork && typeof artwork === 'object' && artwork.template) {
+            imageUrl = artwork.template.replace("{w}x{h}", "600x600").replace("{f}", "jpg");
+        }
+        
+        // Show details & feedUrl
+        let showTitle = "未知節目";
+        let feedUrl = "";
+        const showOffer = ep.showOffer || ep.podcastOffer;
+        if (showOffer && typeof showOffer === 'object') {
+            showTitle = showOffer.title || showTitle;
+            feedUrl = showOffer.feedUrl || "";
+        }
+        
+        return {
+            is_single: true,
+            episode_id: episodeId,
+            show_title: showTitle,
+            episode_title: title,
+            url: streamUrl,
+            date: formattedDate,
+            duration: durationStr,
+            image: imageUrl,
+            feed_url: feedUrl
+        };
+    } else {
+        // Show Page
+        let feedUrls = recursiveSearchKey(serverData, "feedUrl");
+        if (feedUrls.length === 0) {
+            // Regex fallback search
+            const jsonStr = JSON.stringify(serverData);
+            const rssMatch = jsonStr.match(/https?:\/\/[^\s"']*?\.xml[^\s"']*?/);
+            if (rssMatch) {
+                feedUrls = [rssMatch[0]];
+            } else {
+                throw new Error("無法定位此節目的 RSS 訂閱源 (feedUrl) 網址。");
+            }
+        }
+        
+        const rssUrl = feedUrls[0];
+        showParseLoading("成功找到 RSS 訂閱源，正在解析全集資訊...");
+        const xmlText = await fetchWithProxy(rssUrl);
+        return parseRssFeed(xmlText, rssUrl);
+    }
+}
+
+async function resolveUrl(url) {
+    url = url.trim();
+    if (!url) throw new Error("網址不可為空。");
+    
+    if (url.includes("podcasts.apple.com")) {
+        showParseLoading("正在解析 Apple Podcasts 網頁...");
+        const htmlText = await fetchWithProxy(url);
+        return parseApplePodcastUrl(htmlText, url);
+    } else if (url.endsWith(".xml") || url.includes("feed") || url.includes("rss")) {
+        showParseLoading("正在解析 RSS 訂閱源 XML...");
+        const xmlText = await fetchWithProxy(url);
+        return parseRssFeed(xmlText, url);
+    } else {
+        // Attempt Apple Podcasts lookup if ID is provided
+        if (/^\d+$/.test(url)) {
+            showParseLoading("正在查詢 iTunes ID...");
+            const lookupUrl = `https://itunes.apple.com/lookup?id=${url}`;
+            const contents = await fetchWithProxy(lookupUrl);
+            const data = JSON.parse(contents);
+            if (data.resultCount > 0 && data.results[0].feedUrl) {
+                const feedUrl = data.results[0].feedUrl;
+                showParseLoading("成功找到 RSS 訂閱源，正在解析全集資訊...");
+                const xmlText = await fetchWithProxy(feedUrl);
+                return parseRssFeed(xmlText, feedUrl);
+            }
+        }
+        throw new Error("不支援的網址類型。請輸入 Apple Podcasts 連結或直連 RSS XML 網址。");
+    }
+}
+
+// ----------------- FRONTEND UI ACTIONS -----------------
 
 // Handler: Parsing Podcast URL
 async function handleParse() {
@@ -119,30 +367,17 @@ async function handleParse() {
     
     // UI State Reset
     hideError();
-    showParseLoading("正在解析網址，請稍候...");
+    showParseLoading("正在取得網頁內容...");
     elBtnParse.classList.add("loading");
     elBtnParse.disabled = true;
     
     elShowCard.classList.add("hidden");
-    elDownloadDirCard.classList.add("hidden");
+    elDownloadToolsCard.classList.add("hidden");
     elEpisodesCard.classList.add("hidden");
+    stopBrowserBatchDownload();
     
     try {
-        const response = await fetch("/api/parse", {
-            method: "POST",
-            headers: {
-                "Content-Type": "application/json"
-            },
-            body: JSON.stringify({ url: url })
-        });
-        
-        const data = await response.json();
-        if (!response.ok) {
-            throw new Error(data.error || "伺服器解析失敗。");
-        }
-        
-        // Success: store global data and display
-        podcastData = data;
+        podcastData = await resolveUrl(url);
         displayPodcastInfo();
     } catch (err) {
         showError(err.message);
@@ -180,14 +415,9 @@ function displayPodcastInfo() {
         elShowImage.classList.add("hidden");
     }
     
-    // Set default download folder path using sanitized show title
-    const sanitizeTitle = podcastData.show_title.replace(/[\\/:*?"<>|]/g, "_").trim();
-    const defaultBaseDir = "C:\\Users\\user\\Downloads\\Podcasts";
-    elDownloadDirInput.value = `${defaultBaseDir}\\${sanitizeTitle}`;
-    
     // Display cards
     elShowCard.classList.remove("hidden");
-    elDownloadDirCard.classList.remove("hidden");
+    elDownloadToolsCard.classList.remove("hidden");
     
     // Handle episode list setup
     selectedEpisodes.clear();
@@ -224,7 +454,7 @@ function renderEpisodesList() {
     elEpisodeCount.textContent = `(${podcastData.episodes.length})`;
     
     if (visibleEpisodes.length === 0) {
-        elEpisodesList.innerHTML = `<tr><td colspan="4" style="text-align: center; color: var(--text-muted); font-style: italic;">沒有找到符合搜尋條件的集數</td></tr>`;
+        elEpisodesList.innerHTML = `<tr><td colspan="5" style="text-align: center; color: var(--text-muted); font-style: italic;">沒有找到符合搜尋條件的集數</td></tr>`;
         return;
     }
     
@@ -242,11 +472,29 @@ function renderEpisodesList() {
             <td style="color: var(--text-sub);">${ep.date || 'N/A'}</td>
             <td class="episode-title-td" title="${ep.title}">${ep.title}</td>
             <td style="color: var(--text-muted);">${ep.duration || 'N/A'}</td>
+            <td>
+                <div class="action-btn-cell">
+                    <button class="btn-icon-only btn-copy-single" title="複製 MP3 連結"><i class="fa-regular fa-copy"></i></button>
+                    <a href="${ep.url}" target="_blank" download="${ep.title}.mp3" class="btn-icon-only btn-dl-single" title="瀏覽器直接下載"><i class="fa-solid fa-download"></i></a>
+                </div>
+            </td>
         `;
         
-        // Toggle selection on row click (excluding checkbox click to prevent double toggling)
+        // Single Copy Link action
+        tr.querySelector(".btn-copy-single").addEventListener("click", (e) => {
+            e.stopPropagation();
+            navigator.clipboard.writeText(ep.url);
+            showToast("已複製單集 MP3 連結");
+        });
+        
+        // Stop row click propagation on download button
+        tr.querySelector(".btn-dl-single").addEventListener("click", (e) => {
+            e.stopPropagation();
+        });
+        
+        // Toggle selection on row click (excluding buttons and checkbox)
         tr.addEventListener("click", (e) => {
-            if (e.target.tagName !== "INPUT" && e.target.type !== "checkbox") {
+            if (e.target.tagName !== "INPUT" && e.target.type !== "checkbox" && !e.target.closest(".btn-icon-only")) {
                 const check = tr.querySelector(".ep-check");
                 check.checked = !check.checked;
                 toggleEpisodeSelection(ep, check.checked, tr);
@@ -290,8 +538,12 @@ function updateSelectionUI() {
     elSelectedCount.textContent = selectedCount;
     elTotalCount.textContent = totalCount;
     
-    elBtnStartDownload.disabled = selectedCount === 0;
-    elBtnStartDownload.innerHTML = `<i class="fa-solid fa-cloud-arrow-down"></i> 下載所選集數 (${selectedCount})`;
+    const disabledState = selectedCount === 0;
+    elBtnCopyLinks.disabled = disabledState;
+    elBtnBrowserDownload.disabled = disabledState;
+    
+    elBtnCopyLinks.innerHTML = `<i class="fa-solid fa-copy"></i> 複製已選 MP3 下載連結 (${selectedCount})`;
+    elBtnBrowserDownload.innerHTML = `<i class="fa-solid fa-download"></i> 瀏覽器直接下載已選項目 (${selectedCount})`;
 }
 
 // Batch Selection Functions
@@ -315,7 +567,6 @@ function selectNone() {
 function selectLatestN(n) {
     if (!podcastData) return;
     selectedEpisodes.clear();
-    // Assuming the list is ordered latest first
     const count = Math.min(n, podcastData.episodes.length);
     for (let i = 0; i < count; i++) {
         selectedEpisodes.add(podcastData.episodes[i]);
@@ -342,169 +593,105 @@ function toggleHeaderSelectAll(e) {
     updateSelectionUI();
 }
 
-// Handler: Start Downloads
-async function startSelectedDownloads() {
-    if (selectedEpisodes.size === 0) return;
-    
-    const downloadDir = elDownloadDirInput.value.trim();
-    if (!downloadDir) {
-        alert("請指定下載儲存路徑！");
-        return;
-    }
-    
-    const episodesToDownload = Array.from(selectedEpisodes).map(ep => ({
-        title: ep.title,
-        url: ep.url,
-        date: ep.date
-    }));
-    
-    try {
-        const response = await fetch("/api/download", {
-            method: "POST",
-            headers: {
-                "Content-Type": "application/json"
-            },
-            body: JSON.stringify({
-                episodes: episodesToDownload,
-                download_dir: downloadDir
-            })
-        });
-        
-        const data = await response.json();
-        if (!response.ok) {
-            throw new Error(data.error || "無法啟動下載任務。");
-        }
-        
-        // Show progress card and start polling state
-        elProgressCard.classList.remove("hidden");
-        startPolling();
-    } catch (err) {
-        alert("啟動下載錯誤: " + err.message);
-    }
-}
-
-// Handler: Cancel Downloads
-async function cancelDownloads() {
-    if (!confirm("確定要取消佇列中所有的下載任務嗎？")) return;
-    
-    try {
-        await fetch("/api/cancel", { method: "POST" });
-        // Polling will update UI state and stop itself
-        checkDownloaderStatus();
-    } catch (err) {
-        console.error("取消下載錯誤: ", err);
-    }
-}
-
-// Handler: Load Full Show when on single episode page
+// Single Episode Load Full Show
 function loadFullShowFromEpisode() {
     if (!podcastData || !podcastData.feed_url) return;
     elUrlInput.value = podcastData.feed_url;
     handleParse();
 }
 
-// Downloader Polling management
-function startPolling() {
-    if (isPolling) return;
-    isPolling = true;
+// ----------------- DOWNLOADING ACTIONS -----------------
+
+// Helper A: Copy Links to Clipboard
+function copySelectedLinks() {
+    if (selectedEpisodes.size === 0) return;
     
-    // Poll immediately, then every 1s
-    checkDownloaderStatus();
-    pollIntervalId = setInterval(checkDownloaderStatus, 1000);
+    const linksList = Array.from(selectedEpisodes).map(ep => ep.url).join("\n");
+    navigator.clipboard.writeText(linksList)
+        .then(() => {
+            alert(`成功複製 ${selectedEpisodes.size} 個 MP3 下載連結！\n\n您可以打開 JDownloader / IDM 貼上，軟體會立即建立下載任務。`);
+        })
+        .catch(err => {
+            console.error("複製連結失敗: ", err);
+            alert("複製失敗，請手動複製控制台中的網址。");
+        });
 }
 
-function stopPolling() {
-    if (!isPolling) return;
-    isPolling = false;
-    if (pollIntervalId) {
-        clearInterval(pollIntervalId);
-        pollIntervalId = null;
-    }
-}
-
-async function checkDownloaderStatus() {
-    try {
-        const response = await fetch("/api/status");
-        if (!response.ok) return;
-        
-        const status = await response.json();
-        updateProgressUI(status);
-        
-        // If there's an active download or items in queue, make sure we keep polling
-        if (status.is_downloading || status.total_in_queue > 0) {
-            elProgressCard.classList.remove("hidden");
-            startPolling();
-        } else {
-            stopPolling();
-        }
-    } catch (err) {
-        console.error("無法取得下載器狀態: ", err);
-    }
-}
-
-function updateProgressUI(status) {
-    // 1. Update queue details
-    elQueueRemaining.textContent = status.total_in_queue;
-    elQueueCompleted.textContent = status.completed_in_session;
+// Helper B: Browser Sequential Pop-up Download
+function startBrowserBatchDownload() {
+    if (selectedEpisodes.size === 0) return;
     
-    // 2. Active Download Card
-    if (status.is_downloading && status.current_episode) {
-        elDownloadIdleContainer.classList.add("hidden");
-        elActiveDownloadContainer.classList.remove("hidden");
-        
-        const ep = status.current_episode;
-        elActiveDownloadTitle.textContent = ep.title;
-        elActiveDownloadTitle.title = ep.title;
-        
-        // Progress bar and numbers
-        elActiveProgressFill.style.width = `${ep.percent}%`;
-        elActiveProgressPercent.textContent = `${ep.percent}%`;
-        
-        const sizeDownloaded = formatBytes(ep.bytes_downloaded);
-        const sizeTotal = formatBytes(ep.bytes_total);
-        elActiveProgressSize.textContent = `${sizeDownloaded} / ${sizeTotal}`;
-        
-        const speedHuman = formatBytes(ep.speed);
-        elActiveProgressSpeed.innerHTML = `<i class="fa-solid fa-gauge-high"></i> ${speedHuman}/s`;
-        
-        // Spin status icon
-        elProgressStatusIcon.classList.add("fa-spin");
+    batchDownloadQueue = Array.from(selectedEpisodes);
+    batchDownloadIndex = 0;
+    isBatchDownloading = true;
+    
+    // Show Progress Card
+    elBrowserProgressCard.classList.remove("hidden");
+    
+    // Start interval loop
+    updateBrowserProgressUI();
+    triggerNextBrowserDownload();
+    batchDownloadInterval = setInterval(triggerNextBrowserDownload, 1500); // 1.5s delay to let browser handle popups safely
+}
+
+function triggerNextBrowserDownload() {
+    if (!isBatchDownloading) {
+        stopBrowserBatchDownload();
+        return;
+    }
+    
+    if (batchDownloadIndex >= batchDownloadQueue.length) {
+        stopBrowserBatchDownload();
+        alert("已完成調用所有選擇的下載連結！\n如果部分項目未下載，請確認您已在瀏覽器設定中「允許此站台下載多個檔案與彈出視窗」。");
+        return;
+    }
+    
+    const ep = batchDownloadQueue[batchDownloadIndex];
+    
+    // Create temporary download element and click it
+    const a = document.createElement("a");
+    a.href = ep.url;
+    a.download = `${ep.title}.mp3`;
+    a.target = "_blank"; // Required for cross-origin downloads to open in new tab and trigger media save
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    
+    batchDownloadIndex++;
+    updateBrowserProgressUI();
+}
+
+function stopBrowserBatchDownload() {
+    isBatchDownloading = false;
+    if (batchDownloadInterval) {
+        clearInterval(batchDownloadInterval);
+        batchDownloadInterval = null;
+    }
+    elBrowserProgressCard.classList.add("hidden");
+}
+
+function updateBrowserProgressUI() {
+    const total = batchDownloadQueue.length;
+    const completed = batchDownloadIndex;
+    const remaining = total - completed;
+    
+    elBrowserQueueRemaining.textContent = remaining;
+    elBrowserQueueCompleted.textContent = completed;
+    
+    const percent = total > 0 ? Math.round((completed / total) * 100) : 0;
+    elBrowserProgressFill.style.width = `${percent}%`;
+    
+    if (completed < total) {
+        const ep = batchDownloadQueue[completed];
+        elBrowserActiveTitle.textContent = ep.title;
+        elBrowserActiveTitle.title = ep.title;
     } else {
-        elActiveDownloadContainer.classList.add("hidden");
-        elDownloadIdleContainer.classList.remove("hidden");
-        elProgressStatusIcon.classList.remove("fa-spin");
-    }
-    
-    // 3. Update logs
-    elLogCompletedCount.textContent = status.completed.length;
-    elLogFailedCount.textContent = status.failed.length;
-    
-    // Completed Log List
-    if (status.completed.length > 0) {
-        elCompletedLogList.innerHTML = status.completed.map(title => `
-            <li class="completed-item">
-                <span title="${title}"><i class="fa-regular fa-circle-check icon-green"></i> ${title}</span>
-                <span style="color: var(--text-muted); font-size: 0.75rem;">已存檔</span>
-            </li>
-        `).reverse().join(""); // Show latest completed at top
-    } else {
-        elCompletedLogList.innerHTML = `<li class="empty-log">尚無完成的下載項目</li>`;
-    }
-    
-    // Failed Log List
-    if (status.failed.length > 0) {
-        elFailedLogList.innerHTML = status.failed.map(item => `
-            <li class="failed-item">
-                <span title="${item.title}"><i class="fa-regular fa-circle-xmark icon-danger"></i> ${item.title}</span>
-                <span class="item-error">${item.error}</span>
-            </li>
-        `).reverse().join("");
-    } else {
-        elFailedLogList.innerHTML = `<li class="empty-log">尚無失敗的下載項目</li>`;
+        elBrowserActiveTitle.textContent = "下載完成";
     }
 }
 
-// UI State Helper Functions
+// ----------------- COMMON UTILS -----------------
+
 function showParseLoading(text) {
     elParseLoadingText.textContent = text;
     elParseLoading.classList.remove("hidden");
@@ -521,4 +708,29 @@ function showError(msg) {
 
 function hideError() {
     elParseError.classList.add("hidden");
+}
+
+function showToast(msg) {
+    // Simple alert or status-bar toast
+    const toast = document.createElement("div");
+    toast.style.position = "fixed";
+    toast.style.bottom = "20px";
+    toast.style.left = "50%";
+    toast.style.transform = "translateX(-50%)";
+    toast.style.background = "rgba(99, 102, 241, 0.9)";
+    toast.style.color = "white";
+    toast.style.padding = "0.6rem 1.2rem";
+    toast.style.borderRadius = "8px";
+    toast.style.fontSize = "0.85rem";
+    toast.style.zIndex = "1000";
+    toast.style.boxShadow = "0 4px 12px rgba(0,0,0,0.3)";
+    toast.style.fontFamily = "sans-serif";
+    toast.textContent = msg;
+    document.body.appendChild(toast);
+    
+    setTimeout(() => {
+        toast.style.opacity = "0";
+        toast.style.transition = "opacity 0.5s ease";
+        setTimeout(() => document.body.removeChild(toast), 500);
+    }, 2000);
 }
